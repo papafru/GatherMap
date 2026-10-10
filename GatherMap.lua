@@ -4,14 +4,64 @@ local ADDON = "Gather Map"
 local MAX_PINS = 300
 local UPDATE_INTERVAL = 0.10
 local DUPLICATE_DISTANCE = 0.004 -- 0.4 map percentage points, as used by classic Gatherer.
-local CORNER_DOT_SIZE = 3
+local WORLD_ICON_SIZE = 16
+local MINIMAP_ICON_SIZE = 16
+local minimapScaleSlider = nil
+local worldMapScaleSlider = nil
 local GRAY_MARKER_OPACITY = 0.85
+local TRACKING_FADE_YARDS = 200 -- Approximate detection radius; server visibility may vary.
+local TRACKING_FADE_TRANSITION = 20
+local TRACKING_FADE_ALPHA = 0
+
+local function ActiveResourceTracking()
+    -- Vanilla exposes the current tracking texture, independent of client language.
+    if not GetTrackingTexture then return "both" end
+    local texture = GetTrackingTexture()
+    if type(texture) ~= "string" then return nil end
+    texture = string.lower(texture)
+    if string.find(texture, "inv_misc_flower_02", 1, true) then return "herb" end
+    if string.find(texture, "spell_nature_earthquake", 1, true) then return "mineral" end
+    return nil
+end
+
+local function TrackingNodeAlpha(kind, distance, tracking)
+    if (kind ~= "herb" and kind ~= "mineral") or
+        (tracking ~= kind and tracking ~= "both") then return 1 end
+    local fraction = math.max(0, math.min(1,
+        (distance - TRACKING_FADE_YARDS) / TRACKING_FADE_TRANSITION))
+    return TRACKING_FADE_ALPHA + (1 - TRACKING_FADE_ALPHA) * fraction
+end
 
 local frame = CreateFrame("Frame", "GatherMapFrame")
 local pins = {}
 local worldPins = {}
 local worldMapCheckbox = nil
+local optionsFrame = nil
+local minimapButton = nil
+local recordCheckboxes = {}
+local minimapVisibleCheckbox = nil
+local worldMapVisibleCheckbox = nil
+local presetCheckboxes = {}
+local resourceCheckboxes = {}
+local presetCacheZone = nil
+local presetCacheNodes = {}
+
+-- Account-wide recording preferences. Existing installations default to ON.
+local recordCategories = {
+    { "herb", "Herbalism" },
+    { "mineral", "Mining" },
+    { "skin", "Skinning" },
+    { "wood", "Woodcutting" },
+    { "lock", "Lockpicking" },
+    { "treasure", "Treasure Chests" },
+}
+
+local function CanRecord(kind)
+    return not GatherMapDB or not GatherMapDB.record or
+        GatherMapDB.record[kind or "herb"] ~= false
+end
 local elapsedSinceUpdate = 0
+local elapsedSinceWorldUpdate = 0
 local pendingNode = nil
 local pendingRequirement = nil
 local pendingKind = nil
@@ -234,18 +284,23 @@ local herbIcons = {
 
 local mineralIcons = {
     ["Copper Vein"] = "Interface\\Icons\\INV_Ore_Copper_01",
-    ["Tin Vein"] = "Interface\\Icons\\INV_Ore_Tin_01",
-    ["Silver Vein"] = "Interface\\Icons\\INV_Ore_Thorium_01",
-    ["Iron Deposit"] = "Interface\\Icons\\INV_Ore_Iron_01",
-    ["Gold Vein"] = "Interface\\Icons\\INV_Ore_Gold_01",
-    ["Mithril Deposit"] = "Interface\\Icons\\INV_Ore_Mithril_02",
-    ["Truesilver Deposit"] = "Interface\\Icons\\INV_Ore_TrueSilver_01",
     ["Dark Iron Deposit"] = "Interface\\Icons\\INV_Ore_Mithril_01",
-    ["Small Thorium Vein"] = "Interface\\Icons\\INV_Ore_Thorium_02",
-    ["Rich Thorium Vein"] = "Interface\\Icons\\INV_Ore_Thorium_02",
-    ["Thorium Vein"] = "Interface\\Icons\\INV_Ore_Thorium_02",
-    ["Small Obsidian Chunk"] = "Interface\\Icons\\INV_Stone_15",
+    ["Gemstone Deposit"] = "Interface\\Icons\\INV_Misc_Gem_Topaz_02",
+    ["Gold Vein"] = "Interface\\Icons\\inv_ore_gold_01",
+    ["Hakkari Thorium Vein"] = "Interface\\Icons\\INV_Ore_Thorium_02",
+    ["Incendicite Mineral Vein"] = "Interface\\Icons\\INV_Ore_Thorium_01",
+    ["Indurium Mineral Vein"] = "Interface\\Icons\\INV_Ore_Mithril_01",
+    ["Iron Deposit"] = "Interface\\Icons\\inv_ore_iron_02",
     ["Large Obsidian Chunk"] = "Interface\\Icons\\INV_Stone_15",
+    ["Lesser Bloodstone Deposit"] = "Interface\\Icons\\INV_Ore_Thorium_01",
+    ["Mithril Deposit"] = "Interface\\Icons\\INV_Ore_Mithril_02",
+    ["Rich Thorium Vein"] = "Interface\\Icons\\INV_Ore_Thorium_02",
+    ["Silver Vein"] = "Interface\\Icons\\INV_Stone_16",
+    ["Small Obsidian Chunk"] = "Interface\\Icons\\obsidian_stone_01",
+    ["Small Thorium Vein"] = "Interface\\Icons\\INV_Ore_Thorium_02",
+    ["Thorium Vein"] = "Interface\\Icons\\INV_Ore_Thorium_02",
+    ["Tin Vein"] = "Interface\\Icons\\INV_Ore_Tin_01",
+    ["Truesilver Deposit"] = "Interface\\Icons\\INV_Ore_TrueSilver_01",
 }
 
 -- GetItemInfo can return no texture when an item is not cached yet. Keep the
@@ -371,6 +426,7 @@ local function NodeDifficulty(node, skillRanks)
     local skillName = resourceSkills[kind]
     if not skillName then return "unknown" end
     local skill = skillRanks and skillRanks[kind] or GetSkillRank(skillName)
+    if node.fromPreset and (not skill or skill <= 0) then return "unknown" end
     return Difficulty(required, skill)
 end
 
@@ -487,7 +543,98 @@ local function LootItem(message)
     return name, texture
 end
 
-local function DatabaseZone(continent, zone, create)
+-- The shipped pfQuest locations are never copied into SavedVariables.  Decode only
+-- the currently requested map; retain just one map to avoid persistent memory use.
+local presetAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+local presetDigits = {}
+local presetDigit
+for presetDigit = 1, string.len(presetAlphabet) do
+    presetDigits[string.sub(presetAlphabet, presetDigit, presetDigit)] = presetDigit - 1
+end
+
+local function PresetNodes(zoneName)
+    if zoneName == presetCacheZone then return presetCacheNodes end
+    presetCacheZone = zoneName
+    presetCacheNodes = {}
+    local groups = GatherMapPreset and GatherMapPreset[zoneName]
+    -- Retain areas missing from shipped locale tables by resolving their IDs in-client.
+    if not groups and GatherMapPreset and C_Map and C_Map.GetAreas then
+        local areas = C_Map.GetAreas()
+        for id, name in pairs(areas or {}) do
+            if CanonicalZoneName(name) == zoneName and GatherMapPreset[id] then
+                groups = GatherMapPreset[id]
+                break
+            end
+        end
+    end
+    if not groups then return presetCacheNodes end
+    local i
+    for i = 1, table.getn(groups) do
+        local entry = groups[i]
+        local resource = GatherMapPresetCatalog and GatherMapPresetCatalog[entry[1]]
+        local name, kind, required, packed
+        if resource then
+            name, kind, required, packed = resource[1], resource[2], resource[3], entry[2]
+        end
+        if packed then
+            local precision = GatherMapPresetPrecision or 500
+            local stride = GatherMapPresetStride or 3
+            local j
+            for j = 1, string.len(packed) - stride + 1, stride do
+                local point, valid = 0, true
+                local k
+                for k = 0, stride - 1 do
+                    local digit = presetDigits[string.sub(packed, j + k, j + k)]
+                    if not digit then valid = false break end
+                    point = point * 64 + digit
+                end
+                local xi = math.floor(point / (precision + 1))
+                local yi = math.mod(point, precision + 1)
+                if valid and xi <= precision and yi <= precision then
+                    table.insert(presetCacheNodes, {
+                        name = name, kind = kind, required = required,
+                        x = xi / precision, y = yi / precision, fromPreset = true,
+                    })
+                end
+            end
+        end
+    end
+    return presetCacheNodes
+end
+
+local function MapZoneName(continent, zone)
+    if not continent or not zone or zone < 1 then return nil end
+    local zones = { GetMapZones(continent) }
+    return CanonicalZoneName(zones[zone])
+end
+
+local function ResourceEnabled(node)
+    local kind = node.kind or "herb"
+    local filters = GatherMapDB.resourceFilters and GatherMapDB.resourceFilters[kind]
+    return not filters or filters[node.name] ~= false
+end
+
+local DatabaseZone
+local function EachDisplayNode(continent, zone, zoneName, visit)
+    if GatherMapDB.preset.showRecorded ~= false then
+        local saved = DatabaseZone(continent, zone, false)
+        if saved then
+            local i
+            for i = 1, table.getn(saved) do
+                if ResourceEnabled(saved[i]) then visit(saved[i]) end
+            end
+        end
+    end
+    if not GatherMapDB.preset.herb and not GatherMapDB.preset.mineral then return end
+    local predefined = PresetNodes(zoneName)
+    local i
+    for i = 1, table.getn(predefined) do
+        local node = predefined[i]
+        if GatherMapDB.preset[node.kind] and ResourceEnabled(node) then visit(node) end
+    end
+end
+
+DatabaseZone = function(continent, zone, create)
     local key = tostring(continent) .. ":" .. tostring(zone)
     if create and not GatherMapDB.nodes[key] then GatherMapDB.nodes[key] = {} end
     return GatherMapDB.nodes[key], key
@@ -496,6 +643,7 @@ end
 local function RecordNode(name, required, kind, texture)
     if not name or name == "" then return end
     kind = kind or "herb"
+    if not CanRecord(kind) then return end
     local continent, zone, zoneName, x, y = GetPosition(true)
     if not continent then
         Print("Could not read your map position; this zone may need additional map data.")
@@ -542,6 +690,7 @@ end
 
 local function RecordNodeOnce(name, required, kind, texture)
     kind = kind or "herb"
+    if not CanRecord(kind) then return end
     local now = GetTime()
     if lastRecordedKind == kind and lastRecordedName == name and
             now - lastRecordedTime < 2 then return end
@@ -632,6 +781,8 @@ local function BeginResourceAction(actionName)
         end
     end
 
+    if not CanRecord(kind) then return false end
+
     pendingNode = name
     pendingRequirement = required
     pendingKind = kind
@@ -639,13 +790,6 @@ local function BeginResourceAction(actionName)
     pendingGather = true
     pendingLootUntil = 0
     return true
-end
-
-local function SetPinColor(pin, color)
-    local i
-    for i = 1, table.getn(pin.edges) do
-        pin.edges[i]:SetTexture(color[1], color[2], color[3], 1)
-    end
 end
 
 -- Self-contained cursor tooltip. This avoids Vanilla tooltip-template and map
@@ -677,11 +821,11 @@ local function ShowMarkerTooltip(pin)
 end
 
 local function PositionMarkerTooltip(cursorX, cursorY)
-    local scale = UIParent:GetEffectiveScale()
+    local scale = markerTooltip:GetEffectiveScale()
     local x, y = cursorX / scale, cursorY / scale
     local width, height = markerTooltip:GetWidth(), markerTooltip:GetHeight()
-    if x + width + 18 > UIParent:GetWidth() then x = x - width - 14 else x = x + 14 end
-    if y + height + 18 > UIParent:GetHeight() then y = y - height - 14 else y = y + 14 end
+    if x + width + 3 > UIParent:GetWidth() then x = x - width - 3 else x = x + 3 end
+    if y + height + 3 > UIParent:GetHeight() then y = y - height - 3 else y = y + 3 end
     markerTooltip:ClearAllPoints()
     markerTooltip:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", x, y)
 end
@@ -743,22 +887,18 @@ local function SetMarkerNames(pin, names)
     if hoveredPin == pin then ShowMarkerTooltip(pin) end
 end
 
-local function AddCornerDot(pin)
-    local texture = pin:CreateTexture(nil, "OVERLAY")
-    table.insert(pin.edges, texture)
-end
-
-local function SizeCornerDot(dot)
-    dot:ClearAllPoints()
-    dot:SetWidth(CORNER_DOT_SIZE)
-    dot:SetHeight(CORNER_DOT_SIZE)
+-- Both maps use the complete texture, without corner dots or cropped UVs.
+local function CreatePinIcon(pin)
+    pin.icon = pin:CreateTexture(nil, "ARTWORK")
+    pin.icon:SetAllPoints(pin)
+    pin.icon:SetTexCoord(0, 1, 0, 1)
 end
 
 local function GetResourceIcon(name, kind, texture)
     kind = kind or "herb"
     if kind == "skin" and skinIcons[name] then return skinIcons[name] end
     if kind == "wood" and woodIcons[name] then return woodIcons[name] end
-    if texture then return texture end
+    if texture and kind ~= "mineral" then return texture end
     if kind == "herb" then return herbIcons[name] or herbIcons["Peacebloom"] end
     if kind == "mineral" then
         local baseName = string.gsub(name or "", "^Ooze Covered ", "")
@@ -767,31 +907,18 @@ local function GetResourceIcon(name, kind, texture)
     return fallbackIcons[kind] or fallbackIcons.treasure
 end
 
-local function SetPinBounds(pin, left, right, bottom, top, anchorParent, anchorPoint)
-    local width = math.max(4, right - left)
-    local height = math.max(4, top - bottom)
-    pin:SetWidth(width)
-    pin:SetHeight(height)
-
-    local topLeftDot, topRightDot, bottomLeftDot, bottomRightDot =
-        pin.edges[1], pin.edges[2], pin.edges[3], pin.edges[4]
-    SizeCornerDot(topLeftDot)
-    SizeCornerDot(topRightDot)
-    SizeCornerDot(bottomLeftDot)
-    SizeCornerDot(bottomRightDot)
-    topLeftDot:SetPoint("TOPLEFT", pin, "TOPLEFT", 0, 0)
-    topRightDot:SetPoint("TOPRIGHT", pin, "TOPRIGHT", 0, 0)
-    bottomLeftDot:SetPoint("BOTTOMLEFT", pin, "BOTTOMLEFT", 0, 0)
-    bottomRightDot:SetPoint("BOTTOMRIGHT", pin, "BOTTOMRIGHT", 0, 0)
-
+-- Group bounds decide placement only; they must never stretch the icon.
+local function SetPinBounds(pin, left, right, bottom, top, size, anchorParent, anchorPoint)
+    local x, y = (left + right) / 2, (bottom + top) / 2
+    pin:SetWidth(size)
+    pin:SetHeight(size)
     anchorParent = anchorParent or Minimap
     anchorPoint = anchorPoint or "CENTER"
-    pin.hitLeft, pin.hitRight = left, right
-    pin.hitBottom, pin.hitTop = bottom, top
+    pin.hitLeft, pin.hitRight = x - size / 2, x + size / 2
+    pin.hitBottom, pin.hitTop = y - size / 2, y + size / 2
     pin.hitParent, pin.hitAnchor = anchorParent, anchorPoint
     pin:ClearAllPoints()
-    pin:SetPoint("CENTER", anchorParent, anchorPoint,
-        (left + right) / 2, (bottom + top) / 2)
+    pin:SetPoint("CENTER", anchorParent, anchorPoint, x, y)
 end
 
 local function AcquirePin(index)
@@ -804,11 +931,7 @@ local function AcquirePin(index)
     else
         pin:SetFrameLevel(Minimap:GetFrameLevel() + 5)
     end
-    pin.edges = {}
-    AddCornerDot(pin)
-    AddCornerDot(pin)
-    AddCornerDot(pin)
-    AddCornerDot(pin)
+    CreatePinIcon(pin)
     pins[index] = pin
     EnableMarkerTooltip(pin)
     return pin
@@ -820,15 +943,7 @@ local function AcquireWorldPin(index)
     pin:SetWidth(14)
     pin:SetHeight(14)
     pin:SetFrameLevel(WorldMapButton:GetFrameLevel() + 5)
-    pin.icon = pin:CreateTexture(nil, "ARTWORK")
-    pin.icon:SetPoint("TOPLEFT", pin, "TOPLEFT", 2, -2)
-    pin.icon:SetPoint("BOTTOMRIGHT", pin, "BOTTOMRIGHT", -2, 2)
-    pin.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-    pin.edges = {}
-    AddCornerDot(pin)
-    AddCornerDot(pin)
-    AddCornerDot(pin)
-    AddCornerDot(pin)
+    CreatePinIcon(pin)
     worldPins[index] = pin
     EnableMarkerTooltip(pin)
     return pin
@@ -839,16 +954,17 @@ local function BoundsOverlap(a, b)
         a.bottom <= b.top and a.top >= b.bottom
 end
 
-local function AddMarkerGroup(groups, x, y, difficulty, resourceName, kind, texture)
+local function AddMarkerGroup(groups, x, y, difficulty, resourceName, kind, texture, displayName, trackingAlpha)
     kind = kind or "herb"
     local group = {
         left = x - 7, right = x + 7, bottom = y - 7, top = y + 7,
         difficulty = difficulty,
+        trackingAlpha = trackingAlpha or 1,
         resourceKey = kind .. ":" .. (resourceName or ""),
         iconTexture = GetResourceIcon(resourceName, kind, texture),
         names = {},
     }
-    if resourceName then group.names[resourceName] = true end
+    if resourceName then group.names[displayName or resourceName] = true end
 
     -- Recheck after every expansion so chains of overlapping markers become
     -- one group even when the first and last markers do not touch directly.
@@ -859,6 +975,7 @@ local function AddMarkerGroup(groups, x, y, difficulty, resourceName, kind, text
         for i = table.getn(groups), 1, -1 do
             local other = groups[i]
             if group.resourceKey == other.resourceKey and BoundsOverlap(group, other) then
+                group.trackingAlpha = math.min(group.trackingAlpha, other.trackingAlpha)
                 local name
                 for name in pairs(other.names) do group.names[name] = true end
                 group.left = math.min(group.left, other.left)
@@ -887,20 +1004,35 @@ local function HideWorldPinsAfter(index)
     for i = index, table.getn(worldPins) do worldPins[i]:Hide() end
 end
 
+local controlMinimapHidden = false
+local function ControlOverMinimap()
+    if not IsControlKeyDown or not IsControlKeyDown() or not Minimap:IsVisible() then return false end
+    local cx, cy = Minimap:GetCenter()
+    local width, height = Minimap:GetWidth(), Minimap:GetHeight()
+    if not cx or not cy or width <= 0 or height <= 0 then return false end
+    local x, y = GetCursorPosition()
+    local scale = Minimap:GetEffectiveScale()
+    local dx, dy = (x / scale - cx) / (width / 2), (y / scale - cy) / (height / 2)
+    return dx * dx + dy * dy <= 1
+end
+
 local function UpdatePins()
+    if ControlOverMinimap() then
+        HidePinsAfter(1)
+        if hoveredPin and hoveredPin.hitParent == Minimap then
+            hoveredPin = nil
+            markerTooltip:Hide()
+        end
+        return
+    end
     if not GatherMapDB or not GatherMapDB.enabled then
         HidePinsAfter(1)
         return
     end
 
     local continent, zone, zoneName, playerX, playerY = GetPosition(false)
-    if not continent or (not zoneScale[zoneName] and not customZoneSize[zoneName]) then
-        HidePinsAfter(1)
-        return
-    end
-
-    local nodes = DatabaseZone(continent, zone, false)
-    if not nodes then
+    if not continent or (not zoneScale[zoneName] and not customZoneSize[zoneName]
+        and not (GatherMapZoneSizes and GatherMapZoneSizes[zoneName])) then
         HidePinsAfter(1)
         return
     end
@@ -908,19 +1040,28 @@ local function UpdatePins()
     local zoom = Minimap:GetZoom() or 0
     local scales = continentScale[continent]
     local minimapScale = scales and scales[zoom + 1]
-    local exactSize = customZoneSize[zoneName]
-    local zoomSet = exactSize and minimapZoomYards[IsMinimapIndoors()]
+    local exactSize = (GatherMapZoneSizes and GatherMapZoneSizes[zoneName]) or customZoneSize[zoneName]
+    local areaID = GatherMapZoneAreaIDs and GatherMapZoneAreaIDs[zoneName]
+    if areaID and C_Map and C_Map.GetMapWorldSize then
+        local w, h = C_Map.GetMapWorldSize(areaID)
+        if type(w) == "number" and type(h) == "number" and w > 0 and h > 0 then
+            exactSize = {w, h}
+        end
+    end
+    local zoomSet = minimapZoomYards[IsMinimapIndoors()]
     local zoomYards = zoomSet and zoomSet[zoom]
     if not exactSize and not minimapScale then HidePinsAfter(1) return end
     if exactSize and not zoomYards then HidePinsAfter(1) return end
 
+    local tracking = ActiveResourceTracking()
     local localScale = zoneScale[zoneName]
-    local radius = Minimap:GetWidth() / 2 - 5
+    local iconSize = MINIMAP_ICON_SIZE * GatherMapDB.minimapNodeScale
+    -- Keep every corner of the square icon inside the circular minimap.
+    local radius = math.max(0, math.min(Minimap:GetWidth(), Minimap:GetHeight()) / 2
+        - iconSize / math.sqrt(2))
     local groups = {}
     local skillRanks = GetResourceSkillRanks()
-    local i
-    for i = 1, table.getn(nodes) do
-        local node = nodes[i]
+    EachDisplayNode(continent, zone, zoneName, function(node)
         local offsetX, offsetY
         if exactSize then
             offsetX = (node.x - playerX) * Minimap:GetWidth() * exactSize[1] / zoomYards
@@ -929,23 +1070,41 @@ local function UpdatePins()
             offsetX = (node.x - playerX) * localScale * minimapScale[1]
             offsetY = (node.y - playerY) * localScale * minimapScale[2]
         end
-        local distance = math.sqrt(offsetX * offsetX + offsetY * offsetY)
-        if distance <= radius and ShouldShowNode(node, skillRanks) then
+        -- Cull BEFORE grouping; map database coordinates may contain hundreds
+        -- of locations, but only a small neighborhood reaches the minimap.
+        if offsetX * offsetX + offsetY * offsetY <= radius * radius and
+                (node.fromPreset or ShouldShowNode(node, skillRanks)) then
             local difficulty = NodeDifficulty(node, skillRanks)
-            AddMarkerGroup(groups, offsetX, -offsetY, difficulty, node.name,
-                node.kind or "herb", node.texture)
+            local kind = node.kind or "herb"
+            -- Convert each axis separately so the fade distance is independent of zoom.
+            local yardsX = offsetX * zoomYards / Minimap:GetWidth()
+            local yardsY = offsetY * zoomYards / Minimap:GetHeight()
+            local distance = math.sqrt(yardsX * yardsX + yardsY * yardsY)
+            local alpha = TrackingNodeAlpha(kind, distance, tracking)
+            -- Fully hidden nodes never enter the visible pool or its hover hit-test.
+            if alpha > 0 then
+                local names = {}; names[node.name] = true
+                table.insert(groups, {left=offsetX-7, right=offsetX+7,
+                    bottom=-offsetY-7, top=-offsetY+7, names=names,
+                    difficulty=difficulty, trackingAlpha=alpha,
+                    iconTexture=GetResourceIcon(node.name, kind, node.texture)})
+            end
         end
+    end)
+
+    if hoveredPin and hoveredPin.hitParent == Minimap then
+        hoveredPin = nil
+        markerTooltip:Hide()
     end
-
-
     local shown = math.min(table.getn(groups), MAX_PINS)
     for i = 1, shown do
         local group = groups[i]
         local pin = AcquirePin(i)
         SetMarkerNames(pin, group.names)
-        SetPinColor(pin, colors[group.difficulty])
-        pin:SetAlpha(group.difficulty == "gray" and GRAY_MARKER_OPACITY or 1.0)
-        SetPinBounds(pin, group.left, group.right, group.bottom, group.top)
+        pin.icon:SetTexture(group.iconTexture)
+        pin:SetAlpha((group.difficulty == "gray" and GRAY_MARKER_OPACITY or 1.0)
+            * group.trackingAlpha)
+        SetPinBounds(pin, group.left, group.right, group.bottom, group.top, iconSize)
         pin:Show()
     end
     HidePinsAfter(shown + 1)
@@ -966,38 +1125,34 @@ local function UpdateWorldMapPins()
         return
     end
 
-    local nodes = DatabaseZone(continent, zone, false)
     local width = WorldMapButton:GetWidth()
     local height = WorldMapButton:GetHeight()
-    if not nodes or not width or not height or width <= 0 or height <= 0 then
+    if not width or not height or width <= 0 or height <= 0 then
         HideWorldPinsAfter(1)
         return
     end
 
     local groups = {}
     local skillRanks = GetResourceSkillRanks()
-    local i
-    for i = 1, table.getn(nodes) do
-        local node = nodes[i]
-        if ShouldShowNode(node, skillRanks) then
+    EachDisplayNode(continent, zone, MapZoneName(continent, zone), function(node)
+        if node.fromPreset or ShouldShowNode(node, skillRanks) then
             local x = node.x * width
             local y = -node.y * height
-            local difficulty = NodeDifficulty(node, skillRanks)
-            AddMarkerGroup(groups, x, y, difficulty, node.name,
-                node.kind or "herb", node.texture)
+            AddMarkerGroup(groups, x, y, NodeDifficulty(node, skillRanks),
+                node.name, node.kind or "herb", node.texture,
+                nil)
         end
-    end
+    end)
 
-    local shown = math.min(table.getn(groups), MAX_PINS)
+    local shown = table.getn(groups)
     for i = 1, shown do
         local group = groups[i]
         local pin = AcquireWorldPin(i)
         SetMarkerNames(pin, group.names)
         pin.icon:SetTexture(group.iconTexture)
-        SetPinColor(pin, colors[group.difficulty])
         pin:SetAlpha(group.difficulty == "gray" and GRAY_MARKER_OPACITY or 1.0)
         SetPinBounds(pin, group.left, group.right, group.bottom, group.top,
-            WorldMapButton, "TOPLEFT")
+            WORLD_ICON_SIZE * GatherMapDB.worldMapNodeScale, WorldMapButton, "TOPLEFT")
         pin:Show()
     end
     HideWorldPinsAfter(shown + 1)
@@ -1021,14 +1176,379 @@ local function CreateWorldMapCheckbox()
     worldMapCheckbox:SetScript("OnClick", function()
         GatherMapDB.worldMapEnabled = this:GetChecked() and true or false
         UpdateWorldMapPins()
+        if worldMapVisibleCheckbox then
+            worldMapVisibleCheckbox:SetChecked(GatherMapDB.worldMapEnabled)
+        end
     end)
+end
+
+-- The vanilla 1.12 API uses the global `this` in script handlers.
+-- All controls are built once, without external UI libraries.
+local function RefreshOptions()
+    if not optionsFrame or not GatherMapDB then return end
+    local i
+    for i = 1, table.getn(recordCategories) do
+        local kind = recordCategories[i][1]
+        recordCheckboxes[kind]:SetChecked(CanRecord(kind))
+    end
+    for _, check in ipairs(resourceCheckboxes) do
+        check:SetChecked(GatherMapDB.resourceFilters[check.resourceKind][check.resourceName] ~= false)
+    end
+    minimapVisibleCheckbox:SetChecked(GatherMapDB.enabled)
+    if minimapScaleSlider then minimapScaleSlider:SetValue(GatherMapDB.minimapNodeScale) end
+    if worldMapScaleSlider then worldMapScaleSlider:SetValue(GatherMapDB.worldMapNodeScale) end
+    worldMapVisibleCheckbox:SetChecked(GatherMapDB.worldMapEnabled)
+    if GatherMapDB.preset then
+        for kind, checkbox in pairs(presetCheckboxes) do
+            checkbox:SetChecked(GatherMapDB.preset[kind])
+        end
+    end
+end
+
+local function ToggleOptions()
+    if not optionsFrame then return end
+    if optionsFrame:IsVisible() then
+        optionsFrame:Hide()
+    else
+        RefreshOptions()
+        optionsFrame:Show()
+    end
+end
+
+local function CreateOptionsFrame()
+    if optionsFrame then return end
+    local panel = CreateFrame("Frame", "GatherMapOptionsFrame", UIParent)
+    optionsFrame = panel
+    panel:SetWidth(354)
+    panel:SetHeight(705)
+    panel:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+    panel:SetFrameStrata("DIALOG")
+    panel:SetMovable(true)
+    panel:EnableMouse(true)
+    panel:RegisterForDrag("LeftButton")
+    panel:SetScript("OnDragStart", function() this:StartMoving() end)
+    panel:SetScript("OnDragStop", function() this:StopMovingOrSizing() end)
+    panel:SetBackdrop({
+        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+        tile = true, tileSize = 32, edgeSize = 32,
+        insets = { left = 11, right = 12, top = 12, bottom = 11 },
+    })
+    panel:SetBackdropColor(0.08, 0.08, 0.11, 1)
+
+    local title = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("TOP", panel, "TOP", 0, -22)
+    title:SetText("Gather Map - Settings")
+
+    local close = CreateFrame("Button", "GatherMapOptionsClose", panel,
+        "UIPanelCloseButton")
+    close:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -4, -4)
+
+    local general = CreateFrame("Frame", "GatherMapGeneralPage", panel)
+    general:SetWidth(354); general:SetHeight(665)
+    general:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -36)
+    local resources = CreateFrame("Frame", "GatherMapResourcesPage", panel)
+    resources:SetWidth(720); resources:SetHeight(595)
+    resources:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -88)
+    local function SelectPage(index)
+        if index == 1 then
+            general:Show(); resources:Hide(); panel:SetWidth(354)
+        else
+            general:Hide(); resources:Show(); panel:SetWidth(760)
+        end
+    end
+    local tab1 = CreateFrame("Button", "GatherMapGeneralTab", panel, "UIPanelButtonTemplate")
+    tab1:SetWidth(130); tab1:SetHeight(24); tab1:SetPoint("TOPLEFT", panel, "TOPLEFT", 28, -48)
+    tab1:SetText("General")
+    tab1:SetScript("OnClick", function() SelectPage(1) end)
+    local tab2 = CreateFrame("Button", "GatherMapResourcesTab", panel, "UIPanelButtonTemplate")
+    tab2:SetWidth(130); tab2:SetHeight(24); tab2:SetPoint("LEFT", tab1, "RIGHT", 8, 0)
+    tab2:SetText("Node Tracking")
+    tab2:SetScript("OnClick", function() SelectPage(2) end)
+    local function MakeResourcePanel(kind, titleText, top, height)
+        local box = CreateFrame("Frame", nil, resources)
+        box:SetWidth(720); box:SetHeight(height)
+        box:SetPoint("TOPLEFT", resources, "TOPLEFT", 0, -top)
+        box:SetBackdrop({bgFile="Interface\\Tooltips\\UI-Tooltip-Background",
+            edgeFile="Interface\\Tooltips\\UI-Tooltip-Border", tile=true, tileSize=16, edgeSize=12,
+            insets={left=3,right=3,top=3,bottom=3}})
+        box:SetBackdropColor(0.08,0.08,0.10,0.9)
+        local heading=box:CreateFontString(nil,"OVERLAY","GameFontNormal")
+        heading:SetPoint("TOPLEFT",box,"TOPLEFT",12,-12)
+        heading:SetText(titleText .. " (required skill)")
+        local choices, seen = {}, {}
+        for _, entry in ipairs(GatherMapPresetCatalog or {}) do
+            if entry[2] == kind and not seen[entry[1]] then
+                seen[entry[1]]=true
+                table.insert(choices,{name=entry[1],required=entry[3] or 0})
+            end
+        end
+        table.sort(choices,function(a,b)
+            if a.required == b.required then return a.name < b.name end
+            return a.required < b.required
+        end)
+        for i, entry in ipairs(choices) do
+            local name="GatherMapResource" .. kind .. i
+            local check=CreateFrame("CheckButton",name,box,"UICheckButtonTemplate")
+            check.resourceKind=kind; check.resourceName=entry.name; check.required=entry.required
+            check:SetWidth(20); check:SetHeight(20)
+            -- Row-major order: read across, then down, in ascending skill order.
+            check:SetPoint("TOPLEFT",box,"TOPLEFT",12+math.mod(i-1,2)*350,-34-math.floor((i-1)/2)*18)
+            getglobal(name.."Text"):SetText(entry.name .. " (" .. entry.required .. ")")
+            check:SetChecked(GatherMapDB.resourceFilters[kind][entry.name] ~= false)
+            check:SetScript("OnClick",function()
+                GatherMapDB.resourceFilters[this.resourceKind][this.resourceName]=this:GetChecked() and true or false
+                UpdatePins(); UpdateWorldMapPins()
+            end)
+            table.insert(resourceCheckboxes,check)
+        end
+    end
+    MakeResourcePanel("mineral","Mining",0,265)
+    MakeResourcePanel("herb","Herbs",278,300)
+    SelectPage(1)
+
+    local intro = general:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    intro:SetPoint("TOPLEFT", general, "TOPLEFT", 28, -57)
+    intro:SetText("Choose which resources Gather Map learns:")
+
+    local i
+    for i = 1, table.getn(recordCategories) do
+        local kind = recordCategories[i][1]
+        local displayName = recordCategories[i][2]
+        local checkName = "GatherMapRecord" .. kind
+        local check = CreateFrame("CheckButton", checkName, general,
+            "UICheckButtonTemplate")
+        check:SetWidth(24)
+        check:SetHeight(24)
+        check:SetPoint("TOPLEFT", general, "TOPLEFT", 28, -77 - (i - 1) * 32)
+        local label = getglobal(checkName .. "Text")
+        if label then label:SetText(displayName) end
+        check:SetScript("OnClick", function()
+            GatherMapDB.record[kind] = this:GetChecked() and true or false
+            if not GatherMapDB.record[kind] and pendingKind == kind then
+                ClearPending()
+            end
+        end)
+        recordCheckboxes[kind] = check
+    end
+
+    local note = general:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    note:SetPoint("TOPLEFT", general, "TOPLEFT", 30, -277)
+    note:SetText("Disabled categories keep previously saved nodes.")
+
+    local section = general:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    section:SetPoint("TOPLEFT", general, "TOPLEFT", 28, -308)
+    section:SetText("Display options")
+
+    local mini = CreateFrame("CheckButton", "GatherMapShowMinimap", general,
+        "UICheckButtonTemplate")
+    minimapVisibleCheckbox = mini
+    mini:SetWidth(24)
+    mini:SetHeight(24)
+    mini:SetPoint("TOPLEFT", general, "TOPLEFT", 28, -328)
+    getglobal("GatherMapShowMinimapText"):SetText("Show minimap markers")
+    mini:SetScript("OnClick", function()
+        GatherMapDB.enabled = this:GetChecked() and true or false
+        UpdatePins()
+    end)
+
+    local world = CreateFrame("CheckButton", "GatherMapShowWorldMap", general,
+        "UICheckButtonTemplate")
+    worldMapVisibleCheckbox = world
+    world:SetWidth(24)
+    world:SetHeight(24)
+    world:SetPoint("TOPLEFT", general, "TOPLEFT", 28, -359)
+    getglobal("GatherMapShowWorldMapText"):SetText("Show world map markers")
+    world:SetScript("OnClick", function()
+        GatherMapDB.worldMapEnabled = this:GetChecked() and true or false
+        if worldMapCheckbox then
+            worldMapCheckbox:SetChecked(GatherMapDB.worldMapEnabled)
+        end
+        UpdateWorldMapPins()
+    end)
+
+    local slider = CreateFrame("Slider", "GatherMapMinimapNodeScale", general,
+        "OptionsSliderTemplate")
+    minimapScaleSlider = slider
+    slider:SetWidth(270)
+    slider:SetHeight(16)
+    slider:SetPoint("TOPLEFT", general, "TOPLEFT", 40, -417)
+    slider:SetMinMaxValues(0.5, 2)
+    slider:SetValueStep(0.1)
+    getglobal("GatherMapMinimapNodeScaleLow"):SetText("50%")
+    getglobal("GatherMapMinimapNodeScaleHigh"):SetText("200%")
+    slider:SetScript("OnValueChanged", function()
+        if not GatherMapDB then return end
+        local value = math.floor(this:GetValue() * 10 + 0.5) / 10
+        GatherMapDB.minimapNodeScale = math.max(0.5, math.min(2, value))
+        getglobal("GatherMapMinimapNodeScaleText"):SetText(
+            "Minimap icon scale: " .. math.floor(GatherMapDB.minimapNodeScale * 100 + 0.5) .. "%")
+        UpdatePins()
+    end)
+    getglobal("GatherMapMinimapNodeScaleText"):SetText("Minimap icon scale: 100%")
+    slider:SetValue(GatherMapDB.minimapNodeScale)
+
+    local worldSlider = CreateFrame("Slider", "GatherMapWorldMapNodeScale", general,
+        "OptionsSliderTemplate")
+    worldMapScaleSlider = worldSlider
+    worldSlider:SetWidth(270)
+    worldSlider:SetHeight(16)
+    worldSlider:SetPoint("TOPLEFT", general, "TOPLEFT", 40, -477)
+    worldSlider:SetMinMaxValues(0.5, 2)
+    worldSlider:SetValueStep(0.1)
+    getglobal("GatherMapWorldMapNodeScaleLow"):SetText("50%")
+    getglobal("GatherMapWorldMapNodeScaleHigh"):SetText("200%")
+    worldSlider:SetScript("OnValueChanged", function()
+        if not GatherMapDB then return end
+        local value = math.floor(this:GetValue() * 10 + 0.5) / 10
+        GatherMapDB.worldMapNodeScale = math.max(0.5, math.min(2, value))
+        getglobal("GatherMapWorldMapNodeScaleText"):SetText(
+            "World map icon scale: " .. math.floor(GatherMapDB.worldMapNodeScale * 100 + 0.5) .. "%")
+        UpdateWorldMapPins()
+    end)
+    getglobal("GatherMapWorldMapNodeScaleText"):SetText("World map icon scale: 100%")
+    worldSlider:SetValue(GatherMapDB.worldMapNodeScale)
+
+    local databaseTitle = general:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    databaseTitle:SetPoint("TOPLEFT", general, "TOPLEFT", 28, -530)
+    databaseTitle:SetText("Map database (pfQuest)")
+
+    local choices = {
+        { "herb", "Herbs" },
+        { "mineral", "Mining Nodes" },
+        { "showRecorded", "My recorded locations" },
+    }
+    local i
+    for i = 1, table.getn(choices) do
+        local field, name = choices[i][1], choices[i][2]
+        local checkName = "GatherMapPreset" .. field
+        local check = CreateFrame("CheckButton", checkName, general,
+            "UICheckButtonTemplate")
+        check:SetWidth(24)
+        check:SetHeight(24)
+        check:SetPoint("TOPLEFT", general, "TOPLEFT", 28, -546 - (i - 1) * 29)
+        local label = getglobal(checkName .. "Text")
+        if label then label:SetText(name) end
+        check:SetScript("OnClick", function()
+            GatherMapDB.preset[field] = this:GetChecked() and true or false
+            UpdatePins()
+            UpdateWorldMapPins()
+        end)
+        presetCheckboxes[field] = check
+    end
+    local sourceNote = general:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    sourceNote:SetPoint("BOTTOMLEFT", general, "BOTTOMLEFT", 28, 20)
+    sourceNote:SetWidth(298)
+    sourceNote:SetJustifyH("LEFT")
+    sourceNote:SetText("Preloaded spots are approximate. Personal nodes are kept separately.")
+
+    table.insert(UISpecialFrames, "GatherMapOptionsFrame")
+    panel:Hide()
+end
+
+local function PositionMinimapButton()
+    if not minimapButton or not GatherMapDB then return end
+    local angle = GatherMapDB.minimapButtonAngle or 210
+    local radians = math.rad(angle)
+    minimapButton:ClearAllPoints()
+    minimapButton:SetPoint("CENTER", Minimap, "CENTER",
+        math.cos(radians) * 80, math.sin(radians) * 80)
+end
+
+local function UpdateMinimapButtonDrag()
+    local scale = UIParent:GetEffectiveScale()
+    local x, y = GetCursorPosition()
+    local centerX, centerY = Minimap:GetCenter()
+    if not centerX or not centerY then return end
+    x = x / scale - centerX
+    y = y / scale - centerY
+    -- Vanilla's Lua library may not provide atan2 on every client build.
+    local angle
+    if math.atan2 then
+        angle = math.atan2(y, x)
+    elseif x == 0 then
+        angle = y >= 0 and (math.pi / 2) or (-math.pi / 2)
+    else
+        angle = math.atan(y / x)
+        if x < 0 then angle = angle + math.pi end
+    end
+    GatherMapDB.minimapButtonAngle = math.deg(angle)
+    PositionMinimapButton()
+end
+
+local function CreateMinimapButton()
+    if minimapButton then return end
+    local button = CreateFrame("Button", "GatherMapMinimapButton", Minimap)
+    minimapButton = button
+    button:SetWidth(32)
+    button:SetHeight(32)
+    button:SetFrameStrata("MEDIUM")
+    button:SetFrameLevel(Minimap:GetFrameLevel() + 7)
+    button:SetNormalTexture("Interface\\Icons\\INV_Misc_Map_01")
+    -- An inscribed square fits entirely inside the tracking button's round rim.
+    local buttonIcon = button:GetNormalTexture()
+    buttonIcon:ClearAllPoints()
+    buttonIcon:SetPoint("CENTER", button, "CENTER", 0, 0)
+    buttonIcon:SetWidth(17)
+    buttonIcon:SetHeight(17)
+    buttonIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    button:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+    local border = button:CreateTexture(nil, "OVERLAY")
+    border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+    border:SetWidth(54)
+    border:SetHeight(54)
+    border:SetPoint("CENTER", button, "CENTER", 10, -10)
+    button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    button:RegisterForDrag("LeftButton")
+    button:SetScript("OnClick", function()
+        ToggleOptions()
+    end)
+    button:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(this, "ANCHOR_LEFT")
+        GameTooltip:AddLine("Gather Map", 0.41, 0.80, 0.44)
+        GameTooltip:AddLine("Click: settings", 1, 1, 1)
+        GameTooltip:AddLine("Drag: move minimap button", 1, 1, 1)
+        GameTooltip:Show()
+    end)
+    button:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    button:SetScript("OnDragStart", function()
+        this:SetScript("OnUpdate", UpdateMinimapButtonDrag)
+    end)
+    button:SetScript("OnDragStop", function()
+        this:SetScript("OnUpdate", nil)
+        UpdateMinimapButtonDrag()
+    end)
+    PositionMinimapButton()
 end
 
 local function InitializeDatabase()
     if type(GatherMapDB) ~= "table" then GatherMapDB = {} end
     if type(GatherMapDB.nodes) ~= "table" then GatherMapDB.nodes = {} end
+    if type(GatherMapDB.resourceFilters) ~= "table" then GatherMapDB.resourceFilters = {} end
+    if type(GatherMapDB.resourceFilters.herb) ~= "table" then GatherMapDB.resourceFilters.herb = {} end
+    if type(GatherMapDB.resourceFilters.mineral) ~= "table" then GatherMapDB.resourceFilters.mineral = {} end
     if GatherMapDB.enabled == nil then GatherMapDB.enabled = true end
+    local nodeScale = tonumber(GatherMapDB.minimapNodeScale) or 1
+    if nodeScale ~= nodeScale then nodeScale = 1 end
+    GatherMapDB.minimapNodeScale = math.max(0.5, math.min(2,
+        math.floor(nodeScale * 10 + 0.5) / 10))
+    local worldNodeScale = tonumber(GatherMapDB.worldMapNodeScale) or 1
+    if worldNodeScale ~= worldNodeScale then worldNodeScale = 1 end
+    GatherMapDB.worldMapNodeScale = math.max(0.5, math.min(2,
+        math.floor(worldNodeScale * 10 + 0.5) / 10))
     if GatherMapDB.worldMapEnabled == nil then GatherMapDB.worldMapEnabled = true end
+    if type(GatherMapDB.record) ~= "table" then GatherMapDB.record = {} end
+    if type(GatherMapDB.preset) ~= "table" then GatherMapDB.preset = {} end
+    if GatherMapDB.preset.herb == nil then GatherMapDB.preset.herb = true end
+    if GatherMapDB.preset.mineral == nil then GatherMapDB.preset.mineral = true end
+    if GatherMapDB.preset.showRecorded == nil then
+        GatherMapDB.preset.showRecorded = true
+    end
+    local i
+    for i = 1, table.getn(recordCategories) do
+        local kind = recordCategories[i][1]
+        if GatherMapDB.record[kind] == nil then GatherMapDB.record[kind] = true end
+    end
     local databaseVersion = tonumber(GatherMapDB.version) or 1
     -- Version 1 databases contained herbs only. Mark them explicitly so the
     -- shared node table can safely hold mining, skinning, and chest locations.
@@ -1058,6 +1578,9 @@ local function InitializeDatabase()
     GatherMapDB.version = 3
     CreateWorldMapCheckbox()
     if worldMapCheckbox then worldMapCheckbox:SetChecked(GatherMapDB.worldMapEnabled) end
+    CreateOptionsFrame()
+    CreateMinimapButton()
+    RefreshOptions()
 end
 
 local function ShowStatus()
@@ -1088,6 +1611,18 @@ local function ShowStatus()
         ", minerals " .. counts.mineral .. ", skins " .. counts.skin ..
         ", trees " .. counts.wood ..
         ", chests " .. (counts.lock + counts.treasure) .. ").")
+    local presetCount = 0
+    if GatherMapPreset then
+        for _, records in pairs(GatherMapPreset) do
+            for _, record in pairs(records) do
+                presetCount = presetCount + string.len(record[2]) / (GatherMapPresetStride or 3)
+            end
+        end
+    end
+    Print("preloaded " .. presetCount .. " possible locations; herbs " ..
+        (GatherMapDB.preset.herb and "on" or "off") .. ", mining " ..
+        (GatherMapDB.preset.mineral and "on" or "off") ..
+        "; learned nodes " .. (GatherMapDB.preset.showRecorded and "visible" or "hidden") .. ".")
     Print("skills: Herbalism " .. GetSkillRank("Herbalism") .. ", Mining " ..
         GetSkillRank("Mining") .. ", Skinning " .. GetSkillRank("Skinning") ..
         ", Survival " .. GetSkillRank("Survival") ..
@@ -1133,7 +1668,12 @@ frame:SetScript("OnEvent", function()
             string.find(arg1, "^You perform (.+) on (.+)%.$")
         local kind = actionKinds[actionName]
         if treeRequirements[gatheredName] then kind = "wood" end
-        if kind == "herb" or kind == "mineral" or kind == "wood" then
+        if kind == "treasure" and pendingRequirement and IsChestName(gatheredName) then
+            kind = "lock"
+        end
+        if not CanRecord(kind) then
+            ClearPending()
+        elseif kind == "herb" or kind == "mineral" or kind == "wood" then
             local required = RequirementFor(kind, gatheredName)
             if pendingNode == gatheredName and pendingRequirement then
                 required = pendingRequirement
@@ -1203,7 +1743,13 @@ frame:SetScript("OnEvent", function()
 end)
 
 frame:SetScript("OnUpdate", function()
+    local hidden = ControlOverMinimap()
+    if hidden ~= controlMinimapHidden then
+        controlMinimapHidden = hidden
+        UpdatePins()
+    end
     elapsedSinceUpdate = elapsedSinceUpdate + arg1
+    elapsedSinceWorldUpdate = elapsedSinceWorldUpdate + arg1
     if elapsedSinceUpdate >= UPDATE_INTERVAL then
         elapsedSinceUpdate = 0
         if pendingLootUntil > 0 and GetTime() > pendingLootUntil then
@@ -1211,26 +1757,34 @@ frame:SetScript("OnUpdate", function()
         end
         InstallInteractHook()
         UpdatePins()
-        UpdateWorldMapPins()
-        UpdateMarkerHover()
+        if elapsedSinceWorldUpdate >= 0.75 then
+            elapsedSinceWorldUpdate = 0
+            UpdateWorldMapPins()
+        end
     end
+    -- Follow the cursor every rendered frame, not only at the node refresh rate.
+    UpdateMarkerHover()
 end)
 
 SLASH_GATHERMAP1 = "/gmap"
 SLASH_GATHERMAP2 = "/gathermap"
 SlashCmdList["GATHERMAP"] = function(message)
     local command = string.lower(message or "")
-    if command == "on" or command == "show" then
+    if command == "config" or command == "options" then
+        ToggleOptions()
+    elseif command == "on" or command == "show" then
         GatherMapDB.enabled = true
         UpdatePins()
+        RefreshOptions()
         Print("minimap markers enabled.")
     elseif command == "off" or command == "hide" then
         GatherMapDB.enabled = false
         UpdatePins()
+        RefreshOptions()
         Print("minimap markers hidden; gathering locations will still be learned.")
     elseif command == "count" or command == "status" or command == "" then
         ShowStatus()
     else
-        Print("commands: /gathermap on, off, or count")
+        Print("commands: /gmap config, on, off, or count")
     end
 end
