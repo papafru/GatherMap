@@ -1519,169 +1519,405 @@ local function ToggleOptions()
     end
 end
 
+-- Visual design shared by all three settings pages.  Texture paths and widget
+-- APIs below are available in the Vanilla 1.12 client used by Turtle WoW 1.18.
 local function CreateOptionsFrame()
     if optionsFrame then return end
+
+    local theme = {
+        navy = { 0.030, 0.041, 0.063, 0.96 },
+        section = { 0.038, 0.050, 0.071, 0.92 },
+        textGold = { 0.84, 0.72, 0.49 },
+        textSoft = { 0.75, 0.77, 0.77 },
+        textMuted = { 0.57, 0.62, 0.65 },
+        copper = { 0.38, 0.30, 0.20, 0.96 },
+        green = { 0.29, 0.73, 0.54 },
+        teal = { 0.42, 0.76, 0.65 },
+    }
+    local solid = "Interface\\Tooltips\\UI-Tooltip-Background"
+    local fineBorder = "Interface\\Tooltips\\UI-Tooltip-Background"
+
+    local function SetTint(fontString, rgb)
+        fontString:SetTextColor(rgb[1], rgb[2], rgb[3])
+        return fontString
+    end
+    local function DarkBackdrop(widget, rgba, border)
+        widget:SetBackdrop({
+            bgFile = solid, edgeFile = fineBorder,
+            tile = true, tileSize = 16, edgeSize = 1,
+            insets = { left = 1, right = 1, top = 1, bottom = 1 },
+        })
+        widget:SetBackdropColor(rgba[1], rgba[2], rgba[3], rgba[4] or 1)
+        local tint = border or theme.copper
+        widget:SetBackdropBorderColor(tint[1], tint[2], tint[3], tint[4] or 1)
+    end
+    local function Heading(parent, content, x, y)
+        local label = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        label:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+        label:SetText(content)
+        SetTint(label, theme.textGold)
+        return label
+    end
+    local function Hint(parent, content, x, y, width)
+        local label = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        label:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+        if width then label:SetWidth(width); label:SetJustifyH("LEFT") end
+        label:SetText(content)
+        SetTint(label, theme.textMuted)
+        return label
+    end
+    local function Section(parent, x, y, width, height)
+        local section = CreateFrame("Frame", nil, parent)
+        section:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+        section:SetWidth(width); section:SetHeight(height)
+        DarkBackdrop(section, theme.section)
+        return section
+    end
+    local function HorizontalLine(parent, x, y, width)
+        local line = parent:CreateTexture(nil, "ARTWORK")
+        line:SetTexture(solid)
+        line:SetVertexColor(0.37, 0.30, 0.20, 0.62)
+        line:SetWidth(width); line:SetHeight(1)
+        line:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+        return line
+    end
+    local function StyleButton(button)
+        -- Replaces the red Blizzard UP / DOWN textures without changing events.
+        button:SetNormalTexture(solid)
+        button:SetPushedTexture(solid)
+        button:SetHighlightTexture(solid)
+        button:GetNormalTexture():SetVertexColor(0.065, 0.077, 0.095, 0.98)
+        button:GetPushedTexture():SetVertexColor(0.13, 0.13, 0.13, 0.98)
+        button:GetHighlightTexture():SetVertexColor(0.24, 0.20, 0.14, 0.24)
+        DarkBackdrop(button, { 0.065, 0.077, 0.095, 0.98 })
+        if button.GetFontString then
+            local label = button:GetFontString()
+            if label then SetTint(label, theme.textGold) end
+        end
+        return button
+    end
+    local function StyleCheck(check, name, text)
+        -- A dark square with a subtle green indicator when checked.
+        check:SetWidth(19); check:SetHeight(19)
+        check:SetNormalTexture(solid)
+        check:SetPushedTexture(solid)
+        check:SetHighlightTexture(solid)
+        check:SetCheckedTexture(solid)
+        check:GetNormalTexture():SetVertexColor(0.075, 0.10, 0.115, 1)
+        check:GetPushedTexture():SetVertexColor(0.13, 0.15, 0.16, 1)
+        check:GetHighlightTexture():SetVertexColor(0.30, 0.36, 0.34, 0.28)
+        local indicator = check:GetCheckedTexture()
+        indicator:SetVertexColor(theme.green[1], theme.green[2], theme.green[3], 1)
+        indicator:ClearAllPoints()
+        indicator:SetPoint("CENTER", check, "CENTER", 0, 0)
+        indicator:SetWidth(9); indicator:SetHeight(9)
+        DarkBackdrop(check, { 0.055, 0.067, 0.073, 0.98 },
+            { 0.32, 0.32, 0.26, 0.96 })
+        local label = getglobal(name .. "Text")
+        if label then
+            label:ClearAllPoints()
+            label:SetPoint("LEFT", check, "RIGHT", 9, 0)
+            label:SetFontObject(GameFontHighlightSmall)
+            label:SetText(text)
+            SetTint(label, theme.textGold)
+        end
+        return check
+    end
+    local function ThemeSlider(slider)
+        -- Keep the built-in slider mechanics and range, only retint artwork.
+        local thumb = slider:GetThumbTexture()
+        if thumb then thumb:SetVertexColor(0.81, 0.69, 0.47, 1) end
+        DarkBackdrop(slider, { 0.07, 0.085, 0.10, 0.65 },
+            { 0.27, 0.26, 0.22, 0.76 })
+    end
+
     local panel = CreateFrame("Frame", "GatherMapOptionsFrame", UIParent)
     optionsFrame = panel
-    panel:SetWidth(354)
-    panel:SetHeight(705)
+    panel:SetWidth(760); panel:SetHeight(700)
     panel:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
     panel:SetFrameStrata("DIALOG")
-    panel:SetMovable(true)
-    panel:EnableMouse(true)
+    panel:SetMovable(true); panel:EnableMouse(true)
     panel:RegisterForDrag("LeftButton")
     panel:SetScript("OnDragStart", function() this:StartMoving() end)
     panel:SetScript("OnDragStop", function() this:StopMovingOrSizing() end)
-    panel:SetBackdrop({
-        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-        tile = true, tileSize = 32, edgeSize = 32,
-        insets = { left = 11, right = 12, top = 12, bottom = 11 },
-    })
-    panel:SetBackdropColor(0.08, 0.08, 0.11, 1)
+    DarkBackdrop(panel, theme.navy, { 0.44, 0.35, 0.22, 0.98 })
 
     local title = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    title:SetPoint("TOP", panel, "TOP", 0, -22)
-    title:SetText("Gather Map - Settings")
-
-    local close = CreateFrame("Button", "GatherMapOptionsClose", panel,
-        "UIPanelCloseButton")
-    close:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -4, -4)
+    title:SetPoint("TOPLEFT", panel, "TOPLEFT", 25, -22)
+    title:SetText("Gather Map")
+    SetTint(title, theme.textGold)
+    local headingRight = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    headingRight:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -53, -28)
+    headingRight:SetText("TURTLE WOW  |  v0.7.0")
+    SetTint(headingRight, theme.teal)
+    Hint(panel, "Learns resources automatically. Choose which markers appear on your maps.",
+        27, -70, 690)
+    HorizontalLine(panel, 24, -95, 710)
+    local close = CreateFrame("Button", "GatherMapOptionsClose", panel, "UIPanelCloseButton")
+    close:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -7, -7)
 
     local general = CreateFrame("Frame", "GatherMapGeneralPage", panel)
-    general:SetWidth(354); general:SetHeight(665)
-    general:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -36)
+    general:SetWidth(712); general:SetHeight(510)
+    general:SetPoint("TOPLEFT", panel, "TOPLEFT", 24, -160)
     local resources = CreateFrame("Frame", "GatherMapResourcesPage", panel)
-    resources:SetWidth(720); resources:SetHeight(595)
-    resources:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -88)
+    resources:SetWidth(712); resources:SetHeight(510)
+    resources:SetPoint("TOPLEFT", panel, "TOPLEFT", 24, -160)
     local transfer = CreateFrame("Frame", "GatherMapTransferPage", panel)
-    transfer:SetWidth(720); transfer:SetHeight(595)
-    transfer:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -88)
+    transfer:SetWidth(712); transfer:SetHeight(510)
+    transfer:SetPoint("TOPLEFT", panel, "TOPLEFT", 24, -160)
+
+    local tabs = {}
+    local tabNames = { "General", "Node Tracking", "Import / Export" }
     local function SelectPage(index)
         general:Hide(); resources:Hide(); transfer:Hide()
-        if index == 1 then
-            general:Show(); panel:SetWidth(354)
-        elseif index == 2 then
-            resources:Show(); panel:SetWidth(760)
-        else
-            transfer:Show(); panel:SetWidth(760)
+        if index == 1 then general:Show()
+        elseif index == 2 then resources:Show()
+        else transfer:Show() end
+        for i, button in ipairs(tabs) do
+            if i == index then
+                button:SetBackdropColor(0.13, 0.14, 0.15, 0.98)
+                button:SetBackdropBorderColor(0.56, 0.45, 0.27, 1)
+                button.activeLine:Show()
+            else
+                button:SetBackdropColor(0.045, 0.055, 0.073, 0.98)
+                button:SetBackdropBorderColor(0.29, 0.27, 0.23, 1)
+                button.activeLine:Hide()
+            end
         end
     end
-    local tab1 = CreateFrame("Button", "GatherMapGeneralTab", panel, "UIPanelButtonTemplate")
-    tab1:SetWidth(105); tab1:SetHeight(24); tab1:SetPoint("TOPLEFT", panel, "TOPLEFT", 18, -48)
-    tab1:SetText("General")
-    tab1:SetScript("OnClick", function() SelectPage(1) end)
-    local tab2 = CreateFrame("Button", "GatherMapResourcesTab", panel, "UIPanelButtonTemplate")
-    tab2:SetWidth(105); tab2:SetHeight(24); tab2:SetPoint("LEFT", tab1, "RIGHT", 7, 0)
-    tab2:SetText("Node Tracking")
-    tab2:SetScript("OnClick", function() SelectPage(2) end)
-    local tab3 = CreateFrame("Button", "GatherMapTransferTab", panel, "UIPanelButtonTemplate")
-    tab3:SetWidth(105); tab3:SetHeight(24)
-    tab3:SetPoint("LEFT", tab2, "RIGHT", 7, 0)
-    tab3:SetText("Import / Export")
-    tab3:SetScript("OnClick", function() SelectPage(3) end)
+    for i, tabName in ipairs(tabNames) do
+        local names = { "GatherMapGeneralTab", "GatherMapResourcesTab", "GatherMapTransferTab" }
+        local tab = CreateFrame("Button", names[i], panel, "UIPanelButtonTemplate")
+        tab:SetWidth(229); tab:SetHeight(34)
+        tab:SetPoint("TOPLEFT", panel, "TOPLEFT", 24 + (i - 1) * 241, -110)
+        tab:SetText(tabName)
+        StyleButton(tab)
+        local stripe = tab:CreateTexture(nil, "OVERLAY")
+        stripe:SetTexture(solid)
+        stripe:SetVertexColor(theme.textGold[1], theme.textGold[2], theme.textGold[3], 1)
+        stripe:SetHeight(2)
+        stripe:SetPoint("BOTTOMLEFT", tab, "BOTTOMLEFT", 0, 0)
+        stripe:SetPoint("BOTTOMRIGHT", tab, "BOTTOMRIGHT", 0, 0)
+        tab.activeLine = stripe
+        local pageIndex = i
+        tab:SetScript("OnClick", function() SelectPage(pageIndex) end)
+        tabs[i] = tab
+    end
+    local footer = Hint(panel, "GATHER MAP  |  ALWAYS LEARNING", 25, -677, 390)
+    SetTint(footer, theme.teal)
+    local footerRight = panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    footerRight:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -26, -677)
+    footerRight:SetText("Settings and personal data are saved automatically")
+    SetTint(footerRight, theme.textMuted)
+
+    -- GENERAL: two-column layout instead of the old 354-pixel-tall form.
+    local learnBox = Section(general, 0, 0, 346, 503)
+    Heading(learnBox, "Resource tracking", 18, -19)
+    Hint(learnBox, "Hidden categories are still learned.", 18, -46, 310)
+    HorizontalLine(learnBox, 18, -67, 310)
+    for i = 1, table.getn(trackingCategories) do
+        local kind = trackingCategories[i][1]
+        local displayName = trackingCategories[i][2]
+        local checkName = "GatherMapTrack" .. kind
+        local check = CreateFrame("CheckButton", checkName, learnBox, "UICheckButtonTemplate")
+        check:SetPoint("TOPLEFT", learnBox, "TOPLEFT", 22, -84 - (i - 1) * 56)
+        StyleCheck(check, checkName, displayName)
+        check:SetScript("OnClick", function()
+            GatherMapDB.tracked[kind] = this:GetChecked() and true or false
+            UpdatePins(); UpdateWorldMapPins()
+        end)
+        trackingCheckboxes[kind] = check
+        if i < table.getn(trackingCategories) then
+            HorizontalLine(learnBox, 20, -119 - (i - 1) * 56, 306)
+        end
+    end
+    Hint(learnBox, "Recording never stops when a filter is disabled.", 19, -447, 306)
+    Hint(learnBox, "Unchecking only hides the matching markers.", 19, -467, 306)
+
+    local displayBox = Section(general, 358, 0, 354, 263)
+    Heading(displayBox, "Display options", 18, -19)
+    HorizontalLine(displayBox, 18, -45, 318)
+    local mini = CreateFrame("CheckButton", "GatherMapShowMinimap", displayBox,
+        "UICheckButtonTemplate")
+    minimapVisibleCheckbox = mini
+    mini:SetPoint("TOPLEFT", displayBox, "TOPLEFT", 21, -58)
+    StyleCheck(mini, "GatherMapShowMinimap", "Show minimap markers")
+    mini:SetScript("OnClick", function()
+        GatherMapDB.enabled = this:GetChecked() and true or false
+        UpdatePins()
+    end)
+    local world = CreateFrame("CheckButton", "GatherMapShowWorldMap", displayBox,
+        "UICheckButtonTemplate")
+    worldMapVisibleCheckbox = world
+    world:SetPoint("TOPLEFT", displayBox, "TOPLEFT", 21, -91)
+    StyleCheck(world, "GatherMapShowWorldMap", "Show world map markers")
+    world:SetScript("OnClick", function()
+        GatherMapDB.worldMapEnabled = this:GetChecked() and true or false
+        if worldMapCheckbox then worldMapCheckbox:SetChecked(GatherMapDB.worldMapEnabled) end
+        UpdateWorldMapPins()
+    end)
+    local slider = CreateFrame("Slider", "GatherMapMinimapNodeScale", displayBox,
+        "OptionsSliderTemplate")
+    minimapScaleSlider = slider
+    slider:SetWidth(277); slider:SetHeight(14)
+    slider:SetPoint("TOPLEFT", displayBox, "TOPLEFT", 39, -160)
+    slider:SetMinMaxValues(0.5, 2); slider:SetValueStep(0.1)
+    ThemeSlider(slider)
+    getglobal("GatherMapMinimapNodeScaleLow"):SetText("50%")
+    getglobal("GatherMapMinimapNodeScaleHigh"):SetText("200%")
+    slider:SetScript("OnValueChanged", function()
+        if not GatherMapDB then return end
+        local value = math.floor(this:GetValue() * 10 + 0.5) / 10
+        GatherMapDB.minimapNodeScale = math.max(0.5, math.min(2, value))
+        getglobal("GatherMapMinimapNodeScaleText"):SetText(
+            "Minimap icon size: " .. math.floor(GatherMapDB.minimapNodeScale * 100 + 0.5) .. "%")
+        UpdatePins()
+    end)
+    getglobal("GatherMapMinimapNodeScaleText"):SetText("Minimap icon size: 100%")
+    slider:SetValue(GatherMapDB.minimapNodeScale)
+
+    local worldSlider = CreateFrame("Slider", "GatherMapWorldMapNodeScale", displayBox,
+        "OptionsSliderTemplate")
+    worldMapScaleSlider = worldSlider
+    worldSlider:SetWidth(277); worldSlider:SetHeight(14)
+    worldSlider:SetPoint("TOPLEFT", displayBox, "TOPLEFT", 39, -227)
+    worldSlider:SetMinMaxValues(0.5, 2); worldSlider:SetValueStep(0.1)
+    ThemeSlider(worldSlider)
+    getglobal("GatherMapWorldMapNodeScaleLow"):SetText("50%")
+    getglobal("GatherMapWorldMapNodeScaleHigh"):SetText("200%")
+    worldSlider:SetScript("OnValueChanged", function()
+        if not GatherMapDB then return end
+        local value = math.floor(this:GetValue() * 10 + 0.5) / 10
+        GatherMapDB.worldMapNodeScale = math.max(0.5, math.min(2, value))
+        getglobal("GatherMapWorldMapNodeScaleText"):SetText(
+            "World map icon size: " .. math.floor(GatherMapDB.worldMapNodeScale * 100 + 0.5) .. "%")
+        UpdateWorldMapPins()
+    end)
+    getglobal("GatherMapWorldMapNodeScaleText"):SetText("World map icon size: 100%")
+    worldSlider:SetValue(GatherMapDB.worldMapNodeScale)
+
+    local databaseBox = Section(general, 358, -274, 354, 229)
+    Heading(databaseBox, "Map database  (pfQuest)", 18, -18)
+    HorizontalLine(databaseBox, 18, -44, 318)
+    local presetChoices = {
+        { "herb", "Preloaded herbs" },
+        { "mineral", "Preloaded mining nodes" },
+        { "showRecorded", "My recorded locations" },
+    }
+    for i = 1, table.getn(presetChoices) do
+        local field, labelText = presetChoices[i][1], presetChoices[i][2]
+        local checkName = "GatherMapPreset" .. field
+        local check = CreateFrame("CheckButton", checkName, databaseBox,
+            "UICheckButtonTemplate")
+        check:SetPoint("TOPLEFT", databaseBox, "TOPLEFT", 21, -63 - (i - 1) * 44)
+        StyleCheck(check, checkName, labelText)
+        check:SetScript("OnClick", function()
+            GatherMapDB.preset[field] = this:GetChecked() and true or false
+            UpdatePins(); UpdateWorldMapPins()
+        end)
+        presetCheckboxes[field] = check
+    end
+    Hint(databaseBox, "pfQuest positions are approximate; learned nodes are separate.",
+        18, -195, 317)
+
+    -- NODE TRACKING: two-column, scrollable lists keep long node names fully
+    -- readable without making the entire GUI taller than the other pages.
     local function MakeResourcePanel(kind, titleText, top, height)
-        local box = CreateFrame("Frame", nil, resources)
-        box:SetWidth(720); box:SetHeight(height)
-        box:SetPoint("TOPLEFT", resources, "TOPLEFT", 0, -top)
-        box:SetBackdrop({bgFile="Interface\\Tooltips\\UI-Tooltip-Background",
-            edgeFile="Interface\\Tooltips\\UI-Tooltip-Border", tile=true, tileSize=16, edgeSize=12,
-            insets={left=3,right=3,top=3,bottom=3}})
-        box:SetBackdropColor(0.08,0.08,0.10,0.9)
-        local heading=box:CreateFontString(nil,"OVERLAY","GameFontNormal")
-        heading:SetPoint("TOPLEFT",box,"TOPLEFT",12,-12)
-        heading:SetText(titleText .. " (required skill)")
+        local box = Section(resources, 0, -top, 712, height)
+        Heading(box, titleText .. "  |  Required skill", 16, -13)
+        HorizontalLine(box, 16, -36, 680)
         local choices, seen = {}, {}
         for _, entry in ipairs(GatherMapPresetCatalog or {}) do
             if entry[2] == kind and not seen[entry[1]] then
-                seen[entry[1]]=true
-                table.insert(choices,{name=entry[1],required=entry[3] or 0})
+                seen[entry[1]] = true
+                table.insert(choices, { name = entry[1], required = entry[3] or 0 })
             end
         end
-        table.sort(choices,function(a,b)
+        table.sort(choices, function(a, b)
             if a.required == b.required then return a.name < b.name end
             return a.required < b.required
         end)
+        local countHint = Hint(box, table.getn(choices) .. " types  |  Scroll for more",
+            530, -13, 168)
+        countHint:SetJustifyH("RIGHT")
+        local scroll = CreateFrame("ScrollFrame", "GatherMapResourceScroll" .. kind, box,
+            "UIPanelScrollFrameTemplate")
+        scroll:SetPoint("TOPLEFT", box, "TOPLEFT", 13, -44)
+        scroll:SetWidth(656); scroll:SetHeight(height - 53)
+        local content = CreateFrame("Frame", nil, scroll)
+        content:SetWidth(637)
+        content:SetHeight(math.max(height - 54, 15 + math.ceil(table.getn(choices) / 2) * 26))
         for i, entry in ipairs(choices) do
-            local name="GatherMapResource" .. kind .. i
-            local check=CreateFrame("CheckButton",name,box,"UICheckButtonTemplate")
-            check.resourceKind=kind; check.resourceName=entry.name; check.required=entry.required
-            check:SetWidth(20); check:SetHeight(20)
-            -- Row-major order: read across, then down, in ascending skill order.
-            check:SetPoint("TOPLEFT",box,"TOPLEFT",12+math.mod(i-1,2)*350,-34-math.floor((i-1)/2)*18)
-            getglobal(name.."Text"):SetText(entry.name .. " (" .. entry.required .. ")")
+            local name = "GatherMapResource" .. kind .. i
+            local check = CreateFrame("CheckButton", name, content, "UICheckButtonTemplate")
+            check.resourceKind = kind; check.resourceName = entry.name
+            check.required = entry.required
+            check:SetPoint("TOPLEFT", content, "TOPLEFT",
+                6 + math.mod(i - 1, 2) * 316,
+                -8 - math.floor((i - 1) / 2) * 26)
+            StyleCheck(check, name, entry.name .. "  (" .. entry.required .. ")")
             check:SetChecked(GatherMapDB.resourceFilters[kind][entry.name] ~= false)
-            check:SetScript("OnClick",function()
-                GatherMapDB.resourceFilters[this.resourceKind][this.resourceName]=this:GetChecked() and true or false
+            check:SetScript("OnClick", function()
+                GatherMapDB.resourceFilters[this.resourceKind][this.resourceName] =
+                    this:GetChecked() and true or false
                 UpdatePins(); UpdateWorldMapPins()
             end)
-            table.insert(resourceCheckboxes,check)
+            table.insert(resourceCheckboxes, check)
         end
+        scroll:SetScrollChild(content)
     end
-    MakeResourcePanel("mineral","Mining",0,265)
-    MakeResourcePanel("herb","Herbs",278,300)
+    MakeResourcePanel("mineral", "Mining", 0, 229)
+    MakeResourcePanel("herb", "Herbalism", 239, 267)
 
-    local transferInfo = transfer:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    transferInfo:SetPoint("TOPLEFT", transfer, "TOPLEFT", 12, -4)
-    transferInfo:SetWidth(670)
-    transferInfo:SetJustifyH("LEFT")
-    transferInfo:SetText("Transfer your learned nodes only. pfQuest presets and settings are not included.")
+    -- IMPORT / EXPORT: matching gold-framed text fields and buttons.
+    local exportBox = Section(transfer, 0, 0, 346, 503)
+    local importBox = Section(transfer, 358, 0, 354, 503)
+    Heading(exportBox, "Export learned locations", 17, -17)
+    Hint(exportBox, "Personal nodes only (no presets or settings).", 17, -46, 310)
+    HorizontalLine(exportBox, 17, -67, 310)
+    Heading(importBox, "Import / merge locations", 17, -17)
+    Hint(importBox, "Paste one GM1 part at a time. Existing nodes are safe.",
+        17, -46, 315)
+    HorizontalLine(importBox, 17, -67, 320)
 
-    local function TransferButton(name, text, x, y, width, click)
-        local button = CreateFrame("Button", name, transfer, "UIPanelButtonTemplate")
-        button:SetWidth(width)
-        button:SetHeight(25)
-        button:SetPoint("TOPLEFT", transfer, "TOPLEFT", x, y)
-        button:SetText(text)
+    local function TransferButton(parent, name, caption, x, y, width, click)
+        local button = CreateFrame("Button", name, parent, "UIPanelButtonTemplate")
+        button:SetWidth(width); button:SetHeight(30)
+        button:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+        button:SetText(caption)
+        StyleButton(button)
         button:SetScript("OnClick", click)
         return button
     end
-    local function TransferTextBox(name, top, height)
-        local outer = CreateFrame("Frame", nil, transfer)
-        outer:SetPoint("TOPLEFT", transfer, "TOPLEFT", 12, -top)
-        outer:SetWidth(685)
-        outer:SetHeight(height)
-        outer:SetBackdrop({
-            bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-            tile = true, tileSize = 16, edgeSize = 12,
-            insets = { left = 3, right = 3, top = 3, bottom = 3 },
-        })
-        outer:SetBackdropColor(0.05, 0.05, 0.08, 0.95)
-        local scroll = CreateFrame("ScrollFrame", name .. "Scroll", outer, "UIPanelScrollFrameTemplate")
-        scroll:SetPoint("TOPLEFT", outer, "TOPLEFT", 9, -8)
-        scroll:SetWidth(635)
-        scroll:SetHeight(height - 16)
+    local function TransferTextBox(parent, name, x, top, width, height)
+        local outer = Section(parent, x, -top, width, height)
+        DarkBackdrop(outer, { 0.018, 0.027, 0.044, 0.98 },
+            { 0.39, 0.34, 0.24, 1 })
+        local scroll = CreateFrame("ScrollFrame", name .. "Scroll", outer,
+            "UIPanelScrollFrameTemplate")
+        scroll:SetPoint("TOPLEFT", outer, "TOPLEFT", 9, -9)
+        scroll:SetWidth(width - 47); scroll:SetHeight(height - 18)
         local edit = CreateFrame("EditBox", name, scroll)
-        edit:SetWidth(628)
-        edit:SetHeight(height - 18)
-        edit:SetMultiLine(true)
-        edit:SetMaxLetters(0)
-        edit:SetAutoFocus(false)
+        edit:SetWidth(width - 52); edit:SetHeight(height - 20)
+        edit:SetMultiLine(true); edit:SetMaxLetters(0); edit:SetAutoFocus(false)
         edit:SetFontObject(ChatFontNormal or GameFontNormal)
+        edit:SetTextColor(0.80, 0.84, 0.81)
         edit:SetTextInsets(4, 4, 4, 4)
         edit:SetScript("OnEscapePressed", function() this:ClearFocus() end)
         edit:SetScript("OnTextChanged", function()
-            -- Keep the scroll child tall enough for wrapped encoded text.
-            local estimated = math.max(height - 18,
-                math.ceil(string.len(this:GetText() or "") / 70) * 16 + 30)
-            if math.abs(this:GetHeight() - estimated) >= 2 then this:SetHeight(estimated) end
+            local estimated = math.max(height - 20,
+                math.ceil(string.len(this:GetText() or "") / 34) * 16 + 28)
+            if math.abs(this:GetHeight() - estimated) >= 2 then
+                this:SetHeight(estimated)
+            end
             if scroll.UpdateScrollChildRect then scroll:UpdateScrollChildRect() end
         end)
         scroll:SetScrollChild(edit)
         return edit
     end
-
-    local exportHeader = transfer:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    exportHeader:SetPoint("TOPLEFT", transfer, "TOPLEFT", 12, -36)
-    exportHeader:SetText("Export recorded locations")
-    local exportEdit = TransferTextBox("GatherMapExportText", 100, 150)
-    local exportStatus = transfer:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    exportStatus:SetPoint("TOPLEFT", transfer, "TOPLEFT", 12, -258)
-    exportStatus:SetWidth(672)
-    exportStatus:SetJustifyH("LEFT")
-    exportStatus:SetText("Click Generate, select all (Ctrl+A), then copy (Ctrl+C).")
-
+    local exportStatus = Hint(exportBox,
+        "Click Generate, then Select All and Ctrl+C.", 18, -438, 311)
+    local exportEdit = TransferTextBox(exportBox, "GatherMapExportText", 17, 127, 312, 296)
     local function ShowExportPart()
         if not transferParts or table.getn(transferParts) == 0 then
             exportEdit:SetText("")
@@ -1690,9 +1926,9 @@ local function CreateOptionsFrame()
         exportEdit:SetText(transferParts[transferPageIndex])
         exportEdit:HighlightText(0, 0)
         exportStatus:SetText("Part " .. transferPageIndex .. "/" .. table.getn(transferParts) ..
-            ": Ctrl+A, Ctrl+C. Copy all parts if sharing a large database.")
+            ": Ctrl+A, Ctrl+C. Share all parts for large databases.")
     end
-    TransferButton("GatherMapExportGenerate", "Generate", 12, -65, 120, function()
+    TransferButton(exportBox, "GatherMapExportGenerate", "Generate", 17, -84, 98, function()
         local count
         transferParts, count = ExportPersonalNodes()
         transferPageIndex = 1
@@ -1707,190 +1943,41 @@ local function CreateOptionsFrame()
             Print("exported " .. count .. " learned nodes in " .. table.getn(transferParts) .. " part(s).")
         end
     end)
-    TransferButton("GatherMapExportPrevious", "< Previous", 141, -65, 118, function()
+    TransferButton(exportBox, "GatherMapExportSelect", "Select All", 123, -84, 96, function()
+        if transferParts and table.getn(transferParts) > 0 then
+            exportEdit:SetFocus(); exportEdit:HighlightText()
+        end
+    end)
+    TransferButton(exportBox, "GatherMapExportPrevious", "<", 227, -84, 42, function()
         if transferParts and transferPageIndex > 1 then
             transferPageIndex = transferPageIndex - 1
             ShowExportPart()
         end
     end)
-    TransferButton("GatherMapExportNext", "Next >", 267, -65, 118, function()
+    TransferButton(exportBox, "GatherMapExportNext", ">", 277, -84, 52, function()
         if transferParts and transferPageIndex < table.getn(transferParts) then
             transferPageIndex = transferPageIndex + 1
             ShowExportPart()
         end
     end)
-    TransferButton("GatherMapExportSelect", "Select All", 393, -65, 118, function()
-        if transferParts and table.getn(transferParts) > 0 then
-            exportEdit:SetFocus()
-            exportEdit:HighlightText()
-        end
-    end)
-
-    local importHeader = transfer:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    importHeader:SetPoint("TOPLEFT", transfer, "TOPLEFT", 12, -291)
-    importHeader:SetText("Import / merge recorded locations")
-    local importHelp = transfer:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    importHelp:SetPoint("TOPLEFT", transfer, "TOPLEFT", 12, -311)
-    importHelp:SetWidth(660)
-    importHelp:SetJustifyH("LEFT")
-    importHelp:SetText("Paste one GM1 part at a time (Ctrl+V), then click Add Part. Existing nodes are never overwritten.")
-    local importEdit = TransferTextBox("GatherMapImportText", 339, 153)
-    local importStatus = transfer:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    importStatus:SetPoint("TOPLEFT", transfer, "TOPLEFT", 12, -538)
-    importStatus:SetWidth(676)
-    importStatus:SetJustifyH("LEFT")
-    importStatus:SetText("Waiting for a GM1 export part.")
-    TransferButton("GatherMapImportAdd", "Add Part / Merge", 12, -501, 165, function()
+    local importEdit = TransferTextBox(importBox, "GatherMapImportText", 18, 84, 317, 339)
+    local importStatus = Hint(importBox,
+        "Waiting for a GM1 export part.", 18, -467, 320)
+    TransferButton(importBox, "GatherMapImportAdd", "Add Part / Merge", 18, -432, 164, function()
         local accepted, result = TransferReceivePart(importEdit:GetText())
         importStatus:SetText(result)
         if accepted then importEdit:SetText("") end
         importEdit:ClearFocus()
         if string.find(result, "^Import done:") then Print(result) end
     end)
-    TransferButton("GatherMapImportReset", "Reset Import", 188, -501, 140, function()
+    TransferButton(importBox, "GatherMapImportReset", "Reset Import", 190, -432, 145, function()
         incomingTransfer = nil
         importEdit:SetText("")
         importEdit:ClearFocus()
         importStatus:SetText("Pending import cleared. Your saved nodes are unchanged.")
     end)
+
     SelectPage(1)
-
-    local intro = general:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    intro:SetPoint("TOPLEFT", general, "TOPLEFT", 28, -57)
-    intro:SetText("Choose which resources Gather Map displays:")
-
-    local i
-    for i = 1, table.getn(trackingCategories) do
-        local kind = trackingCategories[i][1]
-        local displayName = trackingCategories[i][2]
-        local checkName = "GatherMapTrack" .. kind
-        local check = CreateFrame("CheckButton", checkName, general,
-            "UICheckButtonTemplate")
-        check:SetWidth(24)
-        check:SetHeight(24)
-        check:SetPoint("TOPLEFT", general, "TOPLEFT", 28, -77 - (i - 1) * 32)
-        local label = getglobal(checkName .. "Text")
-        if label then label:SetText(displayName) end
-        check:SetScript("OnClick", function()
-            GatherMapDB.tracked[kind] = this:GetChecked() and true or false
-            -- Only marker visibility changes; an in-progress gathering action
-            -- must continue to completion and save any resulting resource.
-            UpdatePins()
-            UpdateWorldMapPins()
-        end)
-        trackingCheckboxes[kind] = check
-    end
-
-    local note = general:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    note:SetPoint("TOPLEFT", general, "TOPLEFT", 30, -277)
-    note:SetText("Always learning. Unchecked = hidden, not deleted.")
-
-    local section = general:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    section:SetPoint("TOPLEFT", general, "TOPLEFT", 28, -308)
-    section:SetText("Display options")
-
-    local mini = CreateFrame("CheckButton", "GatherMapShowMinimap", general,
-        "UICheckButtonTemplate")
-    minimapVisibleCheckbox = mini
-    mini:SetWidth(24)
-    mini:SetHeight(24)
-    mini:SetPoint("TOPLEFT", general, "TOPLEFT", 28, -328)
-    getglobal("GatherMapShowMinimapText"):SetText("Show minimap markers")
-    mini:SetScript("OnClick", function()
-        GatherMapDB.enabled = this:GetChecked() and true or false
-        UpdatePins()
-    end)
-
-    local world = CreateFrame("CheckButton", "GatherMapShowWorldMap", general,
-        "UICheckButtonTemplate")
-    worldMapVisibleCheckbox = world
-    world:SetWidth(24)
-    world:SetHeight(24)
-    world:SetPoint("TOPLEFT", general, "TOPLEFT", 28, -359)
-    getglobal("GatherMapShowWorldMapText"):SetText("Show world map markers")
-    world:SetScript("OnClick", function()
-        GatherMapDB.worldMapEnabled = this:GetChecked() and true or false
-        if worldMapCheckbox then
-            worldMapCheckbox:SetChecked(GatherMapDB.worldMapEnabled)
-        end
-        UpdateWorldMapPins()
-    end)
-
-    local slider = CreateFrame("Slider", "GatherMapMinimapNodeScale", general,
-        "OptionsSliderTemplate")
-    minimapScaleSlider = slider
-    slider:SetWidth(270)
-    slider:SetHeight(16)
-    slider:SetPoint("TOPLEFT", general, "TOPLEFT", 40, -417)
-    slider:SetMinMaxValues(0.5, 2)
-    slider:SetValueStep(0.1)
-    getglobal("GatherMapMinimapNodeScaleLow"):SetText("50%")
-    getglobal("GatherMapMinimapNodeScaleHigh"):SetText("200%")
-    slider:SetScript("OnValueChanged", function()
-        if not GatherMapDB then return end
-        local value = math.floor(this:GetValue() * 10 + 0.5) / 10
-        GatherMapDB.minimapNodeScale = math.max(0.5, math.min(2, value))
-        getglobal("GatherMapMinimapNodeScaleText"):SetText(
-            "Minimap icon scale: " .. math.floor(GatherMapDB.minimapNodeScale * 100 + 0.5) .. "%")
-        UpdatePins()
-    end)
-    getglobal("GatherMapMinimapNodeScaleText"):SetText("Minimap icon scale: 100%")
-    slider:SetValue(GatherMapDB.minimapNodeScale)
-
-    local worldSlider = CreateFrame("Slider", "GatherMapWorldMapNodeScale", general,
-        "OptionsSliderTemplate")
-    worldMapScaleSlider = worldSlider
-    worldSlider:SetWidth(270)
-    worldSlider:SetHeight(16)
-    worldSlider:SetPoint("TOPLEFT", general, "TOPLEFT", 40, -477)
-    worldSlider:SetMinMaxValues(0.5, 2)
-    worldSlider:SetValueStep(0.1)
-    getglobal("GatherMapWorldMapNodeScaleLow"):SetText("50%")
-    getglobal("GatherMapWorldMapNodeScaleHigh"):SetText("200%")
-    worldSlider:SetScript("OnValueChanged", function()
-        if not GatherMapDB then return end
-        local value = math.floor(this:GetValue() * 10 + 0.5) / 10
-        GatherMapDB.worldMapNodeScale = math.max(0.5, math.min(2, value))
-        getglobal("GatherMapWorldMapNodeScaleText"):SetText(
-            "World map icon scale: " .. math.floor(GatherMapDB.worldMapNodeScale * 100 + 0.5) .. "%")
-        UpdateWorldMapPins()
-    end)
-    getglobal("GatherMapWorldMapNodeScaleText"):SetText("World map icon scale: 100%")
-    worldSlider:SetValue(GatherMapDB.worldMapNodeScale)
-
-    local databaseTitle = general:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    databaseTitle:SetPoint("TOPLEFT", general, "TOPLEFT", 28, -530)
-    databaseTitle:SetText("Map database (pfQuest)")
-
-    local choices = {
-        { "herb", "Herbs" },
-        { "mineral", "Mining Nodes" },
-        { "showRecorded", "My recorded locations" },
-    }
-    local i
-    for i = 1, table.getn(choices) do
-        local field, name = choices[i][1], choices[i][2]
-        local checkName = "GatherMapPreset" .. field
-        local check = CreateFrame("CheckButton", checkName, general,
-            "UICheckButtonTemplate")
-        check:SetWidth(24)
-        check:SetHeight(24)
-        check:SetPoint("TOPLEFT", general, "TOPLEFT", 28, -546 - (i - 1) * 29)
-        local label = getglobal(checkName .. "Text")
-        if label then label:SetText(name) end
-        check:SetScript("OnClick", function()
-            GatherMapDB.preset[field] = this:GetChecked() and true or false
-            UpdatePins()
-            UpdateWorldMapPins()
-        end)
-        presetCheckboxes[field] = check
-    end
-    local sourceNote = general:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-    sourceNote:SetPoint("BOTTOMLEFT", general, "BOTTOMLEFT", 28, 20)
-    sourceNote:SetWidth(298)
-    sourceNote:SetJustifyH("LEFT")
-    sourceNote:SetText("Preloaded spots are approximate. Personal nodes are kept separately.")
-
     table.insert(UISpecialFrames, "GatherMapOptionsFrame")
     panel:Hide()
 end

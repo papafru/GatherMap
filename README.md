@@ -69,6 +69,13 @@ opacity and their original texture colors.
 
 ## Settings GUI and minimap button
 
+Version 0.7.0 introduces the World Chat Filter-inspired dark charcoal/arcane-blue
+interface with muted gold text and bronze outlines, custom dark buttons and
+tabs, subtle green checkbox indicators, and a unified three-tab layout.
+The change is visual only: filters, learned data, sliders, and import/export
+behave as before.
+
+
 Click the new Gather Map button around the minimap or type `/gmap config` to
 open the settings window. Drag the minimap button to reposition it.
 
