@@ -1,4 +1,4 @@
--- Gather Map - self-learning Herbalism map markers for Vanilla 1.12.
+-- Gather Map - self-learning resource markers for Turtle WoW / Vanilla 1.12.
 
 local ADDON = "Gather Map"
 local MAX_PINS = 300
@@ -38,7 +38,7 @@ local worldPins = {}
 local worldMapCheckbox = nil
 local optionsFrame = nil
 local minimapButton = nil
-local recordCheckboxes = {}
+local trackingCheckboxes = {}
 local minimapVisibleCheckbox = nil
 local worldMapVisibleCheckbox = nil
 local presetCheckboxes = {}
@@ -46,8 +46,9 @@ local resourceCheckboxes = {}
 local presetCacheZone = nil
 local presetCacheNodes = {}
 
--- Account-wide recording preferences. Existing installations default to ON.
-local recordCategories = {
+-- These categories filter only the display of saved personal nodes.
+-- Learning is ALWAYS active, regardless of visibility settings.
+local trackingCategories = {
     { "herb", "Herbalism" },
     { "mineral", "Mining" },
     { "skin", "Skinning" },
@@ -56,9 +57,9 @@ local recordCategories = {
     { "treasure", "Treasure Chests" },
 }
 
-local function CanRecord(kind)
-    return not GatherMapDB or not GatherMapDB.record or
-        GatherMapDB.record[kind or "herb"] ~= false
+local function IsCategoryTracked(kind)
+    return not GatherMapDB or not GatherMapDB.tracked or
+        GatherMapDB.tracked[kind or "herb"] ~= false
 end
 local elapsedSinceUpdate = 0
 local elapsedSinceWorldUpdate = 0
@@ -426,18 +427,12 @@ local function NodeDifficulty(node, skillRanks)
     local skillName = resourceSkills[kind]
     if not skillName then return "unknown" end
     local skill = skillRanks and skillRanks[kind] or GetSkillRank(skillName)
-    if node.fromPreset and (not skill or skill <= 0) then return "unknown" end
+    if not skill or skill <= 0 then return "unknown" end
     return Difficulty(required, skill)
 end
 
-local function ShouldShowNode(node, skillRanks)
-    local kind = node.kind or "herb"
-    if kind == "treasure" then return true end
-    local skillName = resourceSkills[kind]
-    local skill = skillRanks and skillRanks[kind] or
-        (skillName and GetSkillRank(skillName))
-    return skill and skill > 0
-end
+-- Visibility is chosen by the player, not by their character's profession.
+-- Recorded nodes are account-wide and can be shown on any character.
 
 local function IsMinimapIndoors()
     local temporaryZoom = 0
@@ -534,13 +529,29 @@ local function LootItem(message)
     if not message then return nil, nil end
     local _, _, link = string.find(message, "(|c%x+|Hitem:.-|h%[[^%]]+%]|h|r)")
     local _, _, name = string.find(message, "%[([^%]]+)%]")
-    local texture = nil
+    local texture, itemType = nil, nil
     if link and GetItemInfo then
-        local itemName, itemLink, quality, itemLevel, itemType, itemSubType,
+        local itemName, itemLink, quality, itemLevel, itemTypeFromInfo, itemSubType,
             stackCount, equipSlot, itemTexture = GetItemInfo(link)
         texture = itemTexture
+        -- The item class identifies quest loot even when it is obtained by
+        -- skinning.  Texture alone cannot distinguish quest items.
+        itemType = itemTypeFromInfo
     end
-    return name, texture
+    return name, texture, itemType
+end
+
+local function IsValidSkinningLoot(name, itemType)
+    if not name then return false end
+    -- Quest items may be skinned from creatures; do not learn their names.
+    -- ITEM_CLASS_QUEST is localized on clients that expose it.
+    if itemType == "Quest" or (ITEM_CLASS_QUEST and itemType == ITEM_CLASS_QUEST) then
+        return false
+    end
+    -- The client may not yet have cached GetItemInfo for a custom item.
+    -- Only learn known skins in that case, rather than recording a quest item
+    -- whose class is unknown. Once cached, any non-quest loot is accepted.
+    return itemType ~= nil or skinIcons[name] ~= nil
 end
 
 -- The shipped pfQuest locations are never copied into SavedVariables.  Decode only
@@ -621,7 +632,9 @@ local function EachDisplayNode(continent, zone, zoneName, visit)
         if saved then
             local i
             for i = 1, table.getn(saved) do
-                if ResourceEnabled(saved[i]) then visit(saved[i]) end
+                if IsCategoryTracked(saved[i].kind) and ResourceEnabled(saved[i]) then
+                    visit(saved[i])
+                end
             end
         end
     end
@@ -643,7 +656,6 @@ end
 local function RecordNode(name, required, kind, texture)
     if not name or name == "" then return end
     kind = kind or "herb"
-    if not CanRecord(kind) then return end
     local continent, zone, zoneName, x, y = GetPosition(true)
     if not continent then
         Print("Could not read your map position; this zone may need additional map data.")
@@ -680,17 +692,10 @@ local function RecordNode(name, required, kind, texture)
         kind = kind, texture = texture, count = 1,
         zoneName = zoneName, areaName = areaName,
     })
-    local location = zoneName
-    if areaName and areaName ~= "" and areaName ~= zoneName then
-        location = location .. " - " .. areaName
-    end
-    Print("learned " .. name .. " in " .. location .. " at " ..
-        math.floor(x * 1000) / 10 .. ", " .. math.floor(y * 1000) / 10 .. ".")
 end
 
 local function RecordNodeOnce(name, required, kind, texture)
     kind = kind or "herb"
-    if not CanRecord(kind) then return end
     local now = GetTime()
     if lastRecordedKind == kind and lastRecordedName == name and
             now - lastRecordedTime < 2 then return end
@@ -780,8 +785,6 @@ local function BeginResourceAction(actionName)
             required = required or RequirementFor(kind, name)
         end
     end
-
-    if not CanRecord(kind) then return false end
 
     pendingNode = name
     pendingRequirement = required
@@ -1072,8 +1075,7 @@ local function UpdatePins()
         end
         -- Cull BEFORE grouping; map database coordinates may contain hundreds
         -- of locations, but only a small neighborhood reaches the minimap.
-        if offsetX * offsetX + offsetY * offsetY <= radius * radius and
-                (node.fromPreset or ShouldShowNode(node, skillRanks)) then
+        if offsetX * offsetX + offsetY * offsetY <= radius * radius then
             local difficulty = NodeDifficulty(node, skillRanks)
             local kind = node.kind or "herb"
             -- Convert each axis separately so the fade distance is independent of zoom.
@@ -1135,13 +1137,10 @@ local function UpdateWorldMapPins()
     local groups = {}
     local skillRanks = GetResourceSkillRanks()
     EachDisplayNode(continent, zone, MapZoneName(continent, zone), function(node)
-        if node.fromPreset or ShouldShowNode(node, skillRanks) then
-            local x = node.x * width
-            local y = -node.y * height
-            AddMarkerGroup(groups, x, y, NodeDifficulty(node, skillRanks),
-                node.name, node.kind or "herb", node.texture,
-                nil)
-        end
+        local x = node.x * width
+        local y = -node.y * height
+        AddMarkerGroup(groups, x, y, NodeDifficulty(node, skillRanks),
+            node.name, node.kind or "herb", node.texture, nil)
     end)
 
     local shown = table.getn(groups)
@@ -1182,14 +1181,319 @@ local function CreateWorldMapCheckbox()
     end)
 end
 
+-- Shared-data transfer, intentionally limited to personal learned nodes.
+-- Never execute imported text as Lua: the GM1 format is a validated data format.
+-- The built-in pfQuest preset and all preferences stay local to this client.
+local TRANSFER_PART_LIMIT = 3400
+local TRANSFER_MAX_PARTS = 500
+local TRANSFER_MAX_NODES = 50000
+local transferParts = nil
+local transferPageIndex = 1
+local incomingTransfer = nil
+
+local function TransferHash(value)
+    local hash, i = 5381, 1
+    for i = 1, string.len(value) do
+        hash = math.mod(hash * 33 + string.byte(value, i), 2147483647)
+    end
+    return string.format("%08X", hash)
+end
+
+-- Encode all punctuation, delimiters, percent signs and UTF-8 bytes.
+-- Only ASCII letters, digits, underscores and spaces remain unescaped.
+local function TransferEncode(value)
+    local encoded = string.gsub(tostring(value or ""), "([^%w_ ])", function(char)
+        return string.format("%%%02X", string.byte(char))
+    end)
+    return encoded
+end
+
+local function TransferDecode(value)
+    local result = {}
+    local i = 1
+    while i <= string.len(value) do
+        local ch = string.sub(value, i, i)
+        if ch == "%" then
+            local hex = string.sub(value, i + 1, i + 2)
+            if string.len(hex) ~= 2 or not string.find(hex, "^%x%x$") then return nil end
+            table.insert(result, string.char(tonumber(hex, 16)))
+            i = i + 3
+        elseif string.find(ch, "^[%w_ ]$") then
+            table.insert(result, ch)
+            i = i + 1
+        else
+            return nil
+        end
+    end
+    return table.concat(result)
+end
+
+local function TransferSplit(text, delimiter, expected)
+    local fields, offset = {}, 1
+    while true do
+        local found = string.find(text, delimiter, offset, true)
+        if not found then
+            table.insert(fields, string.sub(text, offset))
+            break
+        end
+        table.insert(fields, string.sub(text, offset, found - 1))
+        if table.getn(fields) >= expected then return nil end
+        offset = found + string.len(delimiter)
+    end
+    if table.getn(fields) ~= expected then return nil end
+    return fields
+end
+
+local function ExportPersonalNodes()
+    local zoneKeys = {}
+    for key, nodes in pairs(GatherMapDB.nodes) do
+        if type(key) == "string" and type(nodes) == "table" then
+            local _, _, continent, zone = string.find(key, "^(%d+):(%d+)$")
+            if continent and zone then table.insert(zoneKeys, key) end
+        end
+    end
+    table.sort(zoneKeys)
+    local lines, count = {}, 0
+    for _, key in ipairs(zoneKeys) do
+        local _, _, continent, zone = string.find(key, "^(%d+):(%d+)$")
+        local nodes = GatherMapDB.nodes[key]
+        local i
+        for i = 1, table.getn(nodes) do
+            local node = nodes[i]
+            if type(node) == "table" and type(node.name) == "string" and
+                    node.name ~= "" and string.len(node.name) <= 160 and
+                    type(node.x) == "number" and type(node.y) == "number" and
+                    node.x >= 0 and node.x <= 1 and node.y >= 0 and node.y <= 1 and
+                    string.len(tostring(node.texture or "")) <= 255 and
+                    string.len(tostring(node.zoneName or "")) <= 160 and
+                    string.len(tostring(node.areaName or "")) <= 160 then
+                local kind = node.kind or "herb"
+                if kind == "herb" or kind == "mineral" or kind == "skin" or
+                        kind == "wood" or kind == "lock" or kind == "treasure" then
+                    local skill = tonumber(node.required)
+                    local savedRequired = skill and skill >= 0 and skill <= 500 and
+                        tostring(math.floor(skill)) or ""
+                    local row = table.concat({
+                        continent, zone, kind,
+                        tostring(math.floor(node.x * 100000 + 0.5)),
+                        tostring(math.floor(node.y * 100000 + 0.5)),
+                        tostring(math.max(1, math.min(1000000, math.floor(tonumber(node.count) or 1)))),
+                        savedRequired,
+                        TransferEncode(node.name), TransferEncode(node.texture),
+                        TransferEncode(node.zoneName), TransferEncode(node.areaName),
+                    }, ",")
+                    table.insert(lines, row)
+                    count = count + 1
+                end
+            end
+        end
+    end
+    if count == 0 then return {}, 0 end
+    local fullHash = TransferHash(table.concat(lines, ";"))
+    local fragments, current = {}, ""
+    for _, row in ipairs(lines) do
+        if string.len(current) > 0 and string.len(current) + 1 + string.len(row) > TRANSFER_PART_LIMIT then
+            table.insert(fragments, current)
+            current = ""
+        end
+        if current == "" then current = row else current = current .. ";" .. row end
+    end
+    if current ~= "" then table.insert(fragments, current) end
+    if table.getn(fragments) > TRANSFER_MAX_PARTS then
+        return nil, count
+    end
+    local parts = {}
+    local i
+    for i = 1, table.getn(fragments) do
+        local fragment = fragments[i]
+        parts[i] = "GM1|" .. fullHash .. "|" .. i .. "|" .. table.getn(fragments) ..
+            "|" .. TransferHash(fragment) .. "|" .. fragment
+    end
+    return parts, count
+end
+
+local function TransferParseRow(raw)
+    local f = TransferSplit(raw, ",", 11)
+    if not f then return nil end
+    local continent, zone, x, y = tonumber(f[1]), tonumber(f[2]), tonumber(f[4]), tonumber(f[5])
+    local count, required = tonumber(f[6]), f[7] ~= "" and tonumber(f[7]) or nil
+    local kind = f[3]
+    if not continent or continent ~= math.floor(continent) or continent < 1 or continent > 2 or
+            not zone or zone ~= math.floor(zone) or zone < 1 or zone > 1024 or
+            not x or x ~= math.floor(x) or x < 0 or x > 100000 or
+            not y or y ~= math.floor(y) or y < 0 or y > 100000 or
+            not count or count ~= math.floor(count) or count < 1 or count > 1000000 or
+            (f[7] ~= "" and not required) or
+            (required and (required < 0 or required > 500 or required ~= math.floor(required))) or
+            (kind ~= "herb" and kind ~= "mineral" and kind ~= "skin" and
+             kind ~= "wood" and kind ~= "lock" and kind ~= "treasure") then
+        return nil
+    end
+    local name, texture = TransferDecode(f[8]), TransferDecode(f[9])
+    local zoneName, areaName = TransferDecode(f[10]), TransferDecode(f[11])
+    if not name or name == "" or string.len(name) > 160 or
+            not texture or string.len(texture) > 255 or
+            not zoneName or string.len(zoneName) > 160 or
+            not areaName or string.len(areaName) > 160 then return nil end
+    return {
+        continent = continent, zone = zone, name = name, kind = kind,
+        x = x / 100000, y = y / 100000, count = count,
+        required = required, texture = texture ~= "" and texture or nil,
+        zoneName = zoneName, areaName = areaName,
+    }
+end
+
+local function TransferResolveZone(continent, sourceZone, name)
+    if not name or name == "" then return sourceZone end
+    local known = { GetMapZones(continent) }
+    local i
+    for i = 1, table.getn(known) do
+        if CanonicalZoneName(known[i]) == CanonicalZoneName(name) then return i end
+    end
+    -- Avoid mapping personal nodes to the wrong zone after a client/map update.
+    return nil
+end
+
+local function TransferMerge(data)
+    -- A spatial hash keeps large imports fast. Check the eight neighboring
+    -- cells too, so matches are found across cell boundaries.
+    local added, duplicate, unknownZones = 0, 0, 0
+    local zoneIndexes = {}
+    local cellSize = DUPLICATE_DISTANCE
+    local function CellKey(x, y)
+        return math.floor(x / cellSize) .. ":" .. math.floor(y / cellSize)
+    end
+    local function IndexNode(index, node)
+        if type(node.name) ~= "string" or type(node.x) ~= "number" or
+                type(node.y) ~= "number" then return end
+        local nameKey = (node.kind or "herb") .. "\031" .. node.name
+        if not index[nameKey] then index[nameKey] = {} end
+        local buckets = index[nameKey]
+        local cell = CellKey(node.x, node.y)
+        if not buckets[cell] then buckets[cell] = {} end
+        table.insert(buckets[cell], node)
+    end
+    for _, source in ipairs(data) do
+        local resolvedZone = TransferResolveZone(source.continent, source.zone, source.zoneName)
+        if not resolvedZone then
+            unknownZones = unknownZones + 1
+        else
+            local nodes, zoneKey = DatabaseZone(source.continent, resolvedZone, true)
+            local index = zoneIndexes[zoneKey]
+            if not index then
+                index = {}
+                zoneIndexes[zoneKey] = index
+                for _, existing in ipairs(nodes) do IndexNode(index, existing) end
+            end
+            local nameKey = source.kind .. "\031" .. source.name
+            local buckets = index[nameKey]
+            local cx, cy = math.floor(source.x / cellSize), math.floor(source.y / cellSize)
+            local exists = false
+            if buckets then
+                local dx, dy
+                for dx = -1, 1 do
+                    for dy = -1, 1 do
+                        local bucket = buckets[(cx + dx) .. ":" .. (cy + dy)]
+                        if bucket then
+                            for _, other in ipairs(bucket) do
+                                if math.abs(other.x - source.x) <= DUPLICATE_DISTANCE and
+                                        math.abs(other.y - source.y) <= DUPLICATE_DISTANCE then
+                                    exists = true
+                                    break
+                                end
+                            end
+                        end
+                        if exists then break end
+                    end
+                    if exists then break end
+                end
+            end
+            if exists then
+                duplicate = duplicate + 1
+            else
+                local imported = {
+                    name = source.name, kind = source.kind, x = source.x, y = source.y,
+                    count = source.count, required = source.required,
+                    texture = source.texture, zoneName = source.zoneName,
+                    areaName = source.areaName,
+                }
+                table.insert(nodes, imported)
+                IndexNode(index, imported)
+                added = added + 1
+            end
+        end
+    end
+    UpdatePins()
+    UpdateWorldMapPins()
+    return added, duplicate, unknownZones
+end
+
+local function TransferReceivePart(text)
+    text = string.gsub(text or "", "^%s+", "")
+    text = string.gsub(text, "%s+$", "")
+    local _, _, fullHash, number, total, partHash, fragment =
+        string.find(text, "^GM1|(%x+)|(%d+)|(%d+)|(%x+)|(.+)$")
+    number, total = tonumber(number), tonumber(total)
+    if not fullHash or string.len(fullHash) ~= 8 or not partHash or string.len(partHash) ~= 8 or
+            not number or not total or number < 1 or total < 1 or
+            number > total or total > TRANSFER_MAX_PARTS or string.len(fragment) > 8000 or
+            TransferHash(fragment) ~= partHash then
+        return false, "Invalid or damaged GatherMap export part."
+    end
+    if incomingTransfer and (incomingTransfer.hash ~= fullHash or incomingTransfer.total ~= total) then
+        return false, "Another import is pending. Use Reset Import first."
+    end
+    if not incomingTransfer then
+        incomingTransfer = { hash = fullHash, total = total, chunks = {}, received = 0 }
+    end
+    if incomingTransfer.chunks[number] then
+        if incomingTransfer.chunks[number] == fragment then
+            return false, "This part was already received (" .. incomingTransfer.received .. "/" .. total .. ")."
+        end
+        return false, "Conflicting part. Reset Import to start over."
+    end
+    incomingTransfer.chunks[number] = fragment
+    incomingTransfer.received = incomingTransfer.received + 1
+    if incomingTransfer.received < total then
+        return true, "Part " .. number .. "/" .. total .. " received (" ..
+            incomingTransfer.received .. "/" .. total .. "). Paste the next part."
+    end
+    local joined = table.concat(incomingTransfer.chunks, ";")
+    incomingTransfer = nil
+    if string.len(joined) > 2000000 or TransferHash(joined) ~= fullHash then
+        return false, "Export checksum failed. No nodes were imported."
+    end
+    local decoded, start = {}, 1
+    while start <= string.len(joined) do
+        local separator = string.find(joined, ";", start, true)
+        local raw = separator and string.sub(joined, start, separator - 1) or string.sub(joined, start)
+        local row = TransferParseRow(raw)
+        if not row then
+            return false, "Invalid resource data. No nodes were imported."
+        end
+        table.insert(decoded, row)
+        if table.getn(decoded) > TRANSFER_MAX_NODES then
+            return false, "Too many locations. No nodes were imported."
+        end
+        if not separator then break end
+        start = separator + 1
+    end
+    if string.sub(joined, -1) == ";" then
+        return false, "Invalid final resource record. No nodes were imported."
+    end
+    local added, duplicates, missing = TransferMerge(decoded)
+    return true, "Import done: " .. added .. " new, " .. duplicates ..
+        " duplicates, " .. missing .. " unavailable zones."
+end
+
 -- The vanilla 1.12 API uses the global `this` in script handlers.
 -- All controls are built once, without external UI libraries.
 local function RefreshOptions()
     if not optionsFrame or not GatherMapDB then return end
     local i
-    for i = 1, table.getn(recordCategories) do
-        local kind = recordCategories[i][1]
-        recordCheckboxes[kind]:SetChecked(CanRecord(kind))
+    for i = 1, table.getn(trackingCategories) do
+        local kind = trackingCategories[i][1]
+        trackingCheckboxes[kind]:SetChecked(IsCategoryTracked(kind))
     end
     for _, check in ipairs(resourceCheckboxes) do
         check:SetChecked(GatherMapDB.resourceFilters[check.resourceKind][check.resourceName] ~= false)
@@ -1250,21 +1554,32 @@ local function CreateOptionsFrame()
     local resources = CreateFrame("Frame", "GatherMapResourcesPage", panel)
     resources:SetWidth(720); resources:SetHeight(595)
     resources:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -88)
+    local transfer = CreateFrame("Frame", "GatherMapTransferPage", panel)
+    transfer:SetWidth(720); transfer:SetHeight(595)
+    transfer:SetPoint("TOPLEFT", panel, "TOPLEFT", 20, -88)
     local function SelectPage(index)
+        general:Hide(); resources:Hide(); transfer:Hide()
         if index == 1 then
-            general:Show(); resources:Hide(); panel:SetWidth(354)
+            general:Show(); panel:SetWidth(354)
+        elseif index == 2 then
+            resources:Show(); panel:SetWidth(760)
         else
-            general:Hide(); resources:Show(); panel:SetWidth(760)
+            transfer:Show(); panel:SetWidth(760)
         end
     end
     local tab1 = CreateFrame("Button", "GatherMapGeneralTab", panel, "UIPanelButtonTemplate")
-    tab1:SetWidth(130); tab1:SetHeight(24); tab1:SetPoint("TOPLEFT", panel, "TOPLEFT", 28, -48)
+    tab1:SetWidth(105); tab1:SetHeight(24); tab1:SetPoint("TOPLEFT", panel, "TOPLEFT", 18, -48)
     tab1:SetText("General")
     tab1:SetScript("OnClick", function() SelectPage(1) end)
     local tab2 = CreateFrame("Button", "GatherMapResourcesTab", panel, "UIPanelButtonTemplate")
-    tab2:SetWidth(130); tab2:SetHeight(24); tab2:SetPoint("LEFT", tab1, "RIGHT", 8, 0)
+    tab2:SetWidth(105); tab2:SetHeight(24); tab2:SetPoint("LEFT", tab1, "RIGHT", 7, 0)
     tab2:SetText("Node Tracking")
     tab2:SetScript("OnClick", function() SelectPage(2) end)
+    local tab3 = CreateFrame("Button", "GatherMapTransferTab", panel, "UIPanelButtonTemplate")
+    tab3:SetWidth(105); tab3:SetHeight(24)
+    tab3:SetPoint("LEFT", tab2, "RIGHT", 7, 0)
+    tab3:SetText("Import / Export")
+    tab3:SetScript("OnClick", function() SelectPage(3) end)
     local function MakeResourcePanel(kind, titleText, top, height)
         local box = CreateFrame("Frame", nil, resources)
         box:SetWidth(720); box:SetHeight(height)
@@ -1305,17 +1620,150 @@ local function CreateOptionsFrame()
     end
     MakeResourcePanel("mineral","Mining",0,265)
     MakeResourcePanel("herb","Herbs",278,300)
+
+    local transferInfo = transfer:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    transferInfo:SetPoint("TOPLEFT", transfer, "TOPLEFT", 12, -4)
+    transferInfo:SetWidth(670)
+    transferInfo:SetJustifyH("LEFT")
+    transferInfo:SetText("Transfer your learned nodes only. pfQuest presets and settings are not included.")
+
+    local function TransferButton(name, text, x, y, width, click)
+        local button = CreateFrame("Button", name, transfer, "UIPanelButtonTemplate")
+        button:SetWidth(width)
+        button:SetHeight(25)
+        button:SetPoint("TOPLEFT", transfer, "TOPLEFT", x, y)
+        button:SetText(text)
+        button:SetScript("OnClick", click)
+        return button
+    end
+    local function TransferTextBox(name, top, height)
+        local outer = CreateFrame("Frame", nil, transfer)
+        outer:SetPoint("TOPLEFT", transfer, "TOPLEFT", 12, -top)
+        outer:SetWidth(685)
+        outer:SetHeight(height)
+        outer:SetBackdrop({
+            bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            tile = true, tileSize = 16, edgeSize = 12,
+            insets = { left = 3, right = 3, top = 3, bottom = 3 },
+        })
+        outer:SetBackdropColor(0.05, 0.05, 0.08, 0.95)
+        local scroll = CreateFrame("ScrollFrame", name .. "Scroll", outer, "UIPanelScrollFrameTemplate")
+        scroll:SetPoint("TOPLEFT", outer, "TOPLEFT", 9, -8)
+        scroll:SetWidth(635)
+        scroll:SetHeight(height - 16)
+        local edit = CreateFrame("EditBox", name, scroll)
+        edit:SetWidth(628)
+        edit:SetHeight(height - 18)
+        edit:SetMultiLine(true)
+        edit:SetMaxLetters(0)
+        edit:SetAutoFocus(false)
+        edit:SetFontObject(ChatFontNormal or GameFontNormal)
+        edit:SetTextInsets(4, 4, 4, 4)
+        edit:SetScript("OnEscapePressed", function() this:ClearFocus() end)
+        edit:SetScript("OnTextChanged", function()
+            -- Keep the scroll child tall enough for wrapped encoded text.
+            local estimated = math.max(height - 18,
+                math.ceil(string.len(this:GetText() or "") / 70) * 16 + 30)
+            if math.abs(this:GetHeight() - estimated) >= 2 then this:SetHeight(estimated) end
+            if scroll.UpdateScrollChildRect then scroll:UpdateScrollChildRect() end
+        end)
+        scroll:SetScrollChild(edit)
+        return edit
+    end
+
+    local exportHeader = transfer:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    exportHeader:SetPoint("TOPLEFT", transfer, "TOPLEFT", 12, -36)
+    exportHeader:SetText("Export recorded locations")
+    local exportEdit = TransferTextBox("GatherMapExportText", 100, 150)
+    local exportStatus = transfer:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    exportStatus:SetPoint("TOPLEFT", transfer, "TOPLEFT", 12, -258)
+    exportStatus:SetWidth(672)
+    exportStatus:SetJustifyH("LEFT")
+    exportStatus:SetText("Click Generate, select all (Ctrl+A), then copy (Ctrl+C).")
+
+    local function ShowExportPart()
+        if not transferParts or table.getn(transferParts) == 0 then
+            exportEdit:SetText("")
+            return
+        end
+        exportEdit:SetText(transferParts[transferPageIndex])
+        exportEdit:HighlightText(0, 0)
+        exportStatus:SetText("Part " .. transferPageIndex .. "/" .. table.getn(transferParts) ..
+            ": Ctrl+A, Ctrl+C. Copy all parts if sharing a large database.")
+    end
+    TransferButton("GatherMapExportGenerate", "Generate", 12, -65, 120, function()
+        local count
+        transferParts, count = ExportPersonalNodes()
+        transferPageIndex = 1
+        if not transferParts then
+            exportEdit:SetText("")
+            exportStatus:SetText("Too many locations to export in one session.")
+        elseif table.getn(transferParts) == 0 then
+            exportEdit:SetText("")
+            exportStatus:SetText("No personally recorded locations to export yet.")
+        else
+            ShowExportPart()
+            Print("exported " .. count .. " learned nodes in " .. table.getn(transferParts) .. " part(s).")
+        end
+    end)
+    TransferButton("GatherMapExportPrevious", "< Previous", 141, -65, 118, function()
+        if transferParts and transferPageIndex > 1 then
+            transferPageIndex = transferPageIndex - 1
+            ShowExportPart()
+        end
+    end)
+    TransferButton("GatherMapExportNext", "Next >", 267, -65, 118, function()
+        if transferParts and transferPageIndex < table.getn(transferParts) then
+            transferPageIndex = transferPageIndex + 1
+            ShowExportPart()
+        end
+    end)
+    TransferButton("GatherMapExportSelect", "Select All", 393, -65, 118, function()
+        if transferParts and table.getn(transferParts) > 0 then
+            exportEdit:SetFocus()
+            exportEdit:HighlightText()
+        end
+    end)
+
+    local importHeader = transfer:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    importHeader:SetPoint("TOPLEFT", transfer, "TOPLEFT", 12, -291)
+    importHeader:SetText("Import / merge recorded locations")
+    local importHelp = transfer:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    importHelp:SetPoint("TOPLEFT", transfer, "TOPLEFT", 12, -311)
+    importHelp:SetWidth(660)
+    importHelp:SetJustifyH("LEFT")
+    importHelp:SetText("Paste one GM1 part at a time (Ctrl+V), then click Add Part. Existing nodes are never overwritten.")
+    local importEdit = TransferTextBox("GatherMapImportText", 339, 153)
+    local importStatus = transfer:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    importStatus:SetPoint("TOPLEFT", transfer, "TOPLEFT", 12, -538)
+    importStatus:SetWidth(676)
+    importStatus:SetJustifyH("LEFT")
+    importStatus:SetText("Waiting for a GM1 export part.")
+    TransferButton("GatherMapImportAdd", "Add Part / Merge", 12, -501, 165, function()
+        local accepted, result = TransferReceivePart(importEdit:GetText())
+        importStatus:SetText(result)
+        if accepted then importEdit:SetText("") end
+        importEdit:ClearFocus()
+        if string.find(result, "^Import done:") then Print(result) end
+    end)
+    TransferButton("GatherMapImportReset", "Reset Import", 188, -501, 140, function()
+        incomingTransfer = nil
+        importEdit:SetText("")
+        importEdit:ClearFocus()
+        importStatus:SetText("Pending import cleared. Your saved nodes are unchanged.")
+    end)
     SelectPage(1)
 
     local intro = general:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
     intro:SetPoint("TOPLEFT", general, "TOPLEFT", 28, -57)
-    intro:SetText("Choose which resources Gather Map learns:")
+    intro:SetText("Choose which resources Gather Map displays:")
 
     local i
-    for i = 1, table.getn(recordCategories) do
-        local kind = recordCategories[i][1]
-        local displayName = recordCategories[i][2]
-        local checkName = "GatherMapRecord" .. kind
+    for i = 1, table.getn(trackingCategories) do
+        local kind = trackingCategories[i][1]
+        local displayName = trackingCategories[i][2]
+        local checkName = "GatherMapTrack" .. kind
         local check = CreateFrame("CheckButton", checkName, general,
             "UICheckButtonTemplate")
         check:SetWidth(24)
@@ -1324,17 +1772,18 @@ local function CreateOptionsFrame()
         local label = getglobal(checkName .. "Text")
         if label then label:SetText(displayName) end
         check:SetScript("OnClick", function()
-            GatherMapDB.record[kind] = this:GetChecked() and true or false
-            if not GatherMapDB.record[kind] and pendingKind == kind then
-                ClearPending()
-            end
+            GatherMapDB.tracked[kind] = this:GetChecked() and true or false
+            -- Only marker visibility changes; an in-progress gathering action
+            -- must continue to completion and save any resulting resource.
+            UpdatePins()
+            UpdateWorldMapPins()
         end)
-        recordCheckboxes[kind] = check
+        trackingCheckboxes[kind] = check
     end
 
     local note = general:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
     note:SetPoint("TOPLEFT", general, "TOPLEFT", 30, -277)
-    note:SetText("Disabled categories keep previously saved nodes.")
+    note:SetText("Always learning. Unchecked = hidden, not deleted.")
 
     local section = general:CreateFontString(nil, "ARTWORK", "GameFontNormal")
     section:SetPoint("TOPLEFT", general, "TOPLEFT", 28, -308)
@@ -1537,7 +1986,16 @@ local function InitializeDatabase()
     GatherMapDB.worldMapNodeScale = math.max(0.5, math.min(2,
         math.floor(worldNodeScale * 10 + 0.5) / 10))
     if GatherMapDB.worldMapEnabled == nil then GatherMapDB.worldMapEnabled = true end
-    if type(GatherMapDB.record) ~= "table" then GatherMapDB.record = {} end
+    -- Migrate pre-0.6.7 recording checkboxes into visibility preferences.
+    -- Keep the legacy field untouched for users who roll back the addon.
+    if type(GatherMapDB.tracked) ~= "table" then
+        GatherMapDB.tracked = {}
+        if type(GatherMapDB.record) == "table" then
+            for kind, visible in pairs(GatherMapDB.record) do
+                GatherMapDB.tracked[kind] = visible
+            end
+        end
+    end
     if type(GatherMapDB.preset) ~= "table" then GatherMapDB.preset = {} end
     if GatherMapDB.preset.herb == nil then GatherMapDB.preset.herb = true end
     if GatherMapDB.preset.mineral == nil then GatherMapDB.preset.mineral = true end
@@ -1545,9 +2003,9 @@ local function InitializeDatabase()
         GatherMapDB.preset.showRecorded = true
     end
     local i
-    for i = 1, table.getn(recordCategories) do
-        local kind = recordCategories[i][1]
-        if GatherMapDB.record[kind] == nil then GatherMapDB.record[kind] = true end
+    for i = 1, table.getn(trackingCategories) do
+        local kind = trackingCategories[i][1]
+        if GatherMapDB.tracked[kind] == nil then GatherMapDB.tracked[kind] = true end
     end
     local databaseVersion = tonumber(GatherMapDB.version) or 1
     -- Version 1 databases contained herbs only. Mark them explicitly so the
@@ -1671,9 +2129,7 @@ frame:SetScript("OnEvent", function()
         if kind == "treasure" and pendingRequirement and IsChestName(gatheredName) then
             kind = "lock"
         end
-        if not CanRecord(kind) then
-            ClearPending()
-        elseif kind == "herb" or kind == "mineral" or kind == "wood" then
+        if kind == "herb" or kind == "mineral" or kind == "wood" then
             local required = RequirementFor(kind, gatheredName)
             if pendingNode == gatheredName and pendingRequirement then
                 required = pendingRequirement
@@ -1700,8 +2156,8 @@ frame:SetScript("OnEvent", function()
     elseif event == "CHAT_MSG_LOOT" then
         if pendingKind == "skin" and
                 (pendingGather or GetTime() <= pendingLootUntil) then
-            local itemName, itemTexture = LootItem(arg1)
-            if itemName then
+            local itemName, itemTexture, itemType = LootItem(arg1)
+            if IsValidSkinningLoot(itemName, itemType) then
                 RecordNodeOnce(itemName, pendingRequirement, "skin", itemTexture)
                 pendingLootUntil = GetTime() + 2
                 UpdatePins()

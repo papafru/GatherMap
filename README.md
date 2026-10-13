@@ -20,10 +20,9 @@ the same database and the locations remain available after logout or `/reload`.
 - Each location records its main map zone and the smaller minimap subzone name.
 - Difficulty is recalculated from current skills or character level. Gray
   (low-value) nodes retain 85% opacity; icons keep their original artwork.
-- Recorded profession markers are only displayed when the current character has
-  the corresponding profession or skill; preloaded database markers are an
-  exception (also shown when untrained). Account-wide
-  saved locations remain available on all characters.
+- All resources are learned whenever gathering succeeds, even when their
+  tracking checkbox is disabled. Account-wide saved locations can be shown on
+  any character, including those without the corresponding profession.
 - Custom resources can learn their requirement when the tooltip includes a
   `Requires Herbalism (N)`, `Requires Mining (N)`, or similar line.
 
@@ -32,19 +31,19 @@ the same database and the locations remain available after logout or `/reload`.
 - **Herbalism:** saves the herb node and compares it with Herbalism.
 - **Mining:** saves ore veins and deposits and compares them with Mining.
 - **Survival:** saves Simple, Bright, Shade, Tropical, Dead, and Star Wood Trees
-  after successful Woodcutting and compares them with Survival. Markers only
-  appear on characters who know Survival; Find Trees does not need to remain
-  active after a location has been learned.
+  after successful Woodcutting and compares them with Survival. Find Trees
+  does not need to remain active after a location has been learned.
 - **Skinning:** saves the leather, hide, scale, or other item actually obtained
   and compares the skinned creature's requirement with Skinning. These markers
   are hunting spots rather than exact spawn points because creatures move. The
   requirement follows Vanilla's low-level and high-level creature formulas, so
   the difficulty changes as the character's Skinning skill increases. Known
   Vanilla leathers and hides always use their exact inventory icons, even when
-  the client has not cached the looted item's texture yet.
+  the client has not cached the looted item's texture yet. Quest-class items
+  are excluded; when the item's type is not yet cached, only known skinning
+  materials are accepted to avoid mistakenly learning quest loot.
 - **Lockpicking:** saves world chests that expose a Lockpicking requirement and
-  compares them with the rogue's Lockpicking skill. These markers are only
-  displayed while playing a rogue.
+  compares them with the rogue's Lockpicking skill.
 - **Treasure chests:** saves ordinary open-world chests. Known Vanilla chest
   tiers compare with character level; custom tiers may have unknown difficulty.
 
@@ -73,14 +72,47 @@ opacity and their original texture colors.
 Click the new Gather Map button around the minimap or type `/gmap config` to
 open the settings window. Drag the minimap button to reposition it.
 
-The **Record resources** checkboxes independently enable/disable learning
-Herbalism, Mining, Skinning, Woodcutting, Lockpicking, or Treasure Chests.
-All six are enabled by default, including for existing saved databases.
-Disabling a category prevents **new** locations from being added or existing
-ones updated; it does **not** erase previously collected locations or hide their
-markers. The separate minimap and world-map display checkboxes control marker
-visibility without affecting gathering data collection. Preferences and the
-minimap button's angle are saved account-wide in `GatherMapDB`.
+The **resource tracking** checkboxes independently show/hide personally learned
+Herbalism, Mining, Skinning, Woodcutting, Lockpicking, or Treasure Chest nodes.
+**Recording is always enabled**, even for unchecked categories. Unchecking a
+category hides its personal nodes immediately; checking it again restores all
+previous and newly gathered nodes. Existing checkbox choices are migrated to
+tracking settings. The **Node Tracking** tab controls individual herb/mineral
+types, and the **Map database (pfQuest)** checkboxes separately control built-in
+locations and whether all personal locations are displayed. The minimap and
+world-map checkboxes control whole-map visibility. Saved nodes are never removed
+by changing any of these display settings.
+
+## Import / Export (v0.6.8)
+
+Open `/gmap config` and select the **Import / Export** tab. This feature
+transfers **personally learned nodes only**, including their coordinates,
+resource categories, names, required skill, known item textures, gathering
+counts, and recorded zone/subzone names. It does **not** export the
+built-in pfQuest database or your visibility/GUI settings.
+
+**Export:** Click **Generate**, then **Select All** and **Ctrl+C** to copy the
+`GM1|...` text from the export box. For larger databases, use **Next >**
+and **< Previous** to copy every numbered part in turn. Keep the entire
+string, including its `GM1|` prefix, for each part. Regenerate after
+learning new locations to include them in the next export.
+
+**Import:** Paste a part into the lower text box (**Ctrl+V**) and click
+**Add Part / Merge**. Repeat for all parts, in any order. Nothing is
+merged until all parts have been received and validated. A checksum protects
+against accidentally truncated or damaged text; malformed transfers change
+no nodes. **Reset Import** discards pending parts without modifying any
+saved nodes.
+
+An import **merges** into your personal database: nearby duplicates of the
+same resource category/name are skipped, all existing entries remain untouched,
+and tracking settings are preserved. Imported zone names are resolved against
+the current client's map order. Locations for zones unavailable in this client
+are skipped, with a count in the result message. The display filter checkboxes
+still determine which imported personal nodes are visible.
+
+For a separate safety backup, copy your existing character/account
+`SavedVariables/GatherMap.lua` file before installing new addon versions.
 
 ## Commands
 
@@ -244,3 +276,24 @@ pool reuse and visibility toggles. Final appearance needs verification in-game.
   all addon minimap nodes and their tooltips. Release Ctrl or move outside to
   restore them, subject to normal tracking and resource filters.
 - World-map markers and native tracking markers are unaffected.
+
+## Version 0.6.7: learn everything; tracking is display-only
+
+- The General tab checkboxes now **show/hide personal resource categories**.
+  Learning never depends on these checkboxes (including during Interact actions).
+- Existing `GatherMapDB.record` preferences migrate into `GatherMapDB.tracked`,
+  without deleting the legacy record or any saved nodes.
+- Toggling a category refreshes minimap and world-map icons immediately.
+- Personal markers can be shown on any character; untrained skills show the
+  unknown-difficulty color instead of suppressing the marker.
+- Skinning excludes items classified as Quest. If a loot item's type is not yet
+  available from the client, only recognized skinning materials are learned.
+- The General / Node Tracking tabs, icon-size sliders, pfQuest database, and
+  existing advanced minimap behaviors from v0.6.6 are preserved.
+
+## Version 0.6.9: silent node learning
+
+- Gathering still records all resource nodes as before, but no longer prints
+  a message in chat each time a new node is learned.
+- Other chat messages, saved locations, tracking filters, GUI and import/export
+  functionality are unchanged.
